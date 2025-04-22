@@ -1,0 +1,154 @@
+import streamlit as st
+import pdfplumber
+import pandas as pd
+from io import BytesIO
+import re
+
+# App title and instructions
+st.title("📄 Commission PDF Extractor")
+
+st.markdown("""
+Upload a commission statement PDF and select the provider.  
+Supported:  
+- ✅ Canada Life  
+- ✅ MetLife (structured line-by-line: Broker ID, Firm Name, Policy Number, Scheme Name, etc.)
+""")
+
+uploaded_file = st.file_uploader("Upload your PDF", type=["pdf"])
+provider = st.selectbox("Select the Provider", ["Choose...", "Canada Life", "MetLife"])
+
+if st.button("RUN"):
+    if uploaded_file is None or provider == "Choose...":
+        st.error("Please upload a PDF and select a provider.")
+    else:
+        try:
+            all_rows = []
+
+            with pdfplumber.open(uploaded_file) as pdf:
+
+                if provider == "Canada Life":
+                    current_intermediary = None
+                    for page in pdf.pages:
+                        text = page.extract_text()
+                        if not text:
+                            continue
+                        lines = text.split('\n')
+                        for line in lines:
+                            line = line.strip()
+                            if line.startswith("Intermediary:"):
+                                current_intermediary = line.split("Intermediary:")[1].strip()
+                            elif ("Policy Name" in line or "Intermediary Total" in line or
+                                  "statement of commission" in line.lower()):
+                                continue
+                            elif (current_intermediary and
+                                  len(re.findall(r"\d{2}/\d{2}/\d{4}", line)) >= 2 and
+                                  len(re.findall(r"£", line)) >= 2):
+                                parts = line.split()
+                                policy_idx = next((i for i, part in enumerate(parts) if '/' in part), None)
+                                if policy_idx and policy_idx >= 1:
+                                    company_name = " ".join(parts[:policy_idx])
+                                    policy_code = parts[policy_idx]
+                                    remainder = parts[policy_idx + 1:]
+                                    if len(remainder) >= 6:
+                                        row = [current_intermediary, company_name, policy_code] + remainder[:6]
+                                        all_rows.append(row)
+
+                    columns = [
+                        "Intermediary", "Policy Name", "Policy Code", "Policy Type",
+                        "Received Date", "Due Date", "Payment Received",
+                        "Commission Percentage", "Intermediary Commission"
+                    ]
+
+                elif provider == "MetLife":
+                    current_broker_id = ""
+                    current_firm_name = ""
+
+                    for page in pdf.pages:
+                        text = page.extract_text()
+                        if not text:
+                            continue
+
+                        lines = text.split('\n')
+                        for i, line in enumerate(lines):
+                            line = line.strip()
+
+                            # Detect broker line
+                            if line.startswith("Broker -"):
+                                parts = line.split(" - ")
+                                if len(parts) >= 3:
+                                    current_broker_id = parts[1].strip()
+                                    current_firm_name = parts[2].strip()
+
+                            # Skip headings
+                            elif line.startswith("Policy Number") and "Scheme Name" in line:
+                                continue
+
+                            # Data rows: Must contain valid currency and percent patterns
+                            elif (
+                                "£" in line and "%" in line and
+                                re.search(r"\d{1,2} \w+ \d{4}", line)
+                            ):
+                                row_parts = line.split()
+                                if len(row_parts) >= 7:
+                                    policy_number = row_parts[0]
+
+                                    # Find index of date pattern
+                                    date_match = re.search(r"\d{1,2} \w+ \d{4}", line)
+                                    if not date_match:
+                                        continue
+                                    date_str = date_match.group()
+                                    date_index = line.index(date_str)
+                                    
+                                    # Get everything between policy number and date as scheme name
+                                    try:
+                                        scheme_name = line.split(policy_number)[1].split(date_str)[0].strip()
+                                    except:
+                                        scheme_name = ""
+
+                                    # Extract remaining known fields using regex
+                                    amount_match = re.search(r"£[\d,]+\.\d{2}", line)
+                                    rate_match = re.search(r"\d{1,2}\.\d{2}%", line)
+                                    commission_due_match = re.findall(r"£[\d,]+\.\d{2}", line)
+
+                                    amount_received = amount_match.group() if amount_match else ""
+                                    commission_rate = rate_match.group() if rate_match else ""
+                                    commission_due = commission_due_match[-1] if commission_due_match else ""
+
+                                    all_rows.append([
+                                        current_broker_id,
+                                        current_firm_name,
+                                        policy_number,
+                                        scheme_name,
+                                        date_str,
+                                        amount_received,
+                                        commission_rate,
+                                        commission_due
+                                    ])
+
+                    columns = [
+                        "Broker ID", "Firm Name", "Policy Number", "Scheme Name",
+                        "Date Received", "Amount Received", "Commission Rate", "Commission Due"
+                    ]
+
+            # Show results
+            if not all_rows:
+                st.warning("⚠️ No data rows were found.")
+            else:
+                df = pd.DataFrame(all_rows, columns=columns)
+                st.success(f"✅ {provider} commission data extracted successfully!")
+                st.dataframe(df)
+
+                output = BytesIO()
+                with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                    df.to_excel(writer, index=False, sheet_name=f"{provider} Data")
+                output.seek(0)
+
+                st.download_button(
+                    label="📥 Download Excel File",
+                    data=output,
+                    file_name=f"{provider.replace(' ', '_')}_commission_data.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+        except Exception as e:
+            st.error(f"❌ Error while processing: {e}")
