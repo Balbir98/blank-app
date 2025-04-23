@@ -12,10 +12,11 @@ Supported:
 - ✅ MetLife  
 - ✅ Aviva Healthcare  
 - ✅ INET  
+- ✅ CETA  
 """)
 
 uploaded_file = st.file_uploader("Upload your PDF", type=["pdf"])
-provider = st.selectbox("Select the Provider", ["Choose...", "Canada Life", "MetLife", "Aviva Healthcare", "INET"])
+provider = st.selectbox("Select the Provider", ["Choose...", "Canada Life", "MetLife", "Aviva Healthcare", "INET", "CETA"])
 
 if st.button("RUN"):
     if uploaded_file is None or provider == "Choose...":
@@ -147,16 +148,14 @@ if st.button("RUN"):
                         for row in data_rows:
                             row = [col if col else "" for col in row]
 
-                            # 🔐 Fix: use row[0] if the row is short
                             combined = row[2] if len(row) > 2 else row[0]
 
-                            # Pattern to extract merged content
                             pattern = (
                                 r"(?P<first>[A-Z][a-z]+)"
                                 r"(?P<last>[A-Z][a-z]+)?"
                                 r"(IMD\d+)"
-                                r"(?P<uw>[A-Z]{2,3})?"       # Optional UW
-                                r"(?P<status>[A-Z]{2,4})"    # Status is always present
+                                r"(?P<uw>[A-Z]{2,3})?"       
+                                r"(?P<status>[A-Z]{2,4})"    
                                 r"(\d{2}[A-Za-z]{3}\d{4})"
                                 r"(\d{1,2}\.\d+%)"
                                 r"£([\d,]+\.\d{2})"
@@ -196,6 +195,17 @@ if st.button("RUN"):
                         "Status", "Start", "Rate", "Premium Exc. IPT", "Commission"
                     ]
 
+                elif provider == "CETA":
+                    for page in pdf.pages:
+                        table = page.extract_table()
+                        if table:
+                            data_rows = table[1:]
+                            all_rows.extend(data_rows)
+                    columns = [
+        "Master No", "Policy ID", "Client Name", "Type",
+        "Date", "Reason", "Insurer", "Premium", "Code", "Commission"
+    ]
+
 
             if not all_rows:
                 st.warning("⚠️ No data rows were found.")
@@ -217,4 +227,3 @@ if st.button("RUN"):
                 )
         except Exception as e:
             st.error(f"❌ Error while processing: {e}")
-
