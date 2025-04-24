@@ -11,12 +11,11 @@ Supported:
 - ✅ Canada Life  
 - ✅ MetLife  
 - ✅ Aviva Healthcare  
-- ✅ INET  
 - ✅ CETA  
 """)
 
 uploaded_file = st.file_uploader("Upload your PDF", type=["pdf"])
-provider = st.selectbox("Select the Provider", ["Choose...", "Canada Life", "MetLife", "Aviva Healthcare", "INET", "CETA"])
+provider = st.selectbox("Select the Provider", ["Choose...", "Canada Life", "MetLife", "Aviva Healthcare", "CETA"])
 
 if st.button("RUN"):
     if uploaded_file is None or provider == "Choose...":
@@ -122,78 +121,7 @@ if st.button("RUN"):
                         "FRQ", "Premium", "Type", "Comm %", "Comm Paid", "Agency Code"
                     ]
 
-                elif provider == "INET":
-                    agent_id = ""
-                    firm_name = ""
-                    rows = []
-
-                    for page in pdf.pages:
-                        text = page.extract_text()
-                        if text:
-                            for line in text.split('\n'):
-                                if line.strip().startswith("Agent"):
-                                    agent_match = re.search(r"\((.*?)\)", line)
-                                    if agent_match:
-                                        agent_id = agent_match.group(1).strip()
-                                        post_paren = line.split(")", 1)[1] if ")" in line else ""
-                                        firm_name_segment = post_paren.split("Account Name")[0].strip()
-                                        firm_name_cleaned = re.sub(r"(?<=\d)(?=[A-Za-z])|(?<=[a-z])(?=[A-Z])", " ", firm_name_segment)
-                                        firm_name = " ".join(firm_name_cleaned.split())
-
-                        table = page.extract_table()
-                        if not table:
-                            continue
-                        data_rows = table[1:]
-
-                        for row in data_rows:
-                            row = [col if col else "" for col in row]
-
-                            combined = row[2] if len(row) > 2 else row[0]
-
-                            pattern = (
-                                r"(?P<first>[A-Z][a-z]+)"
-                                r"(?P<last>[A-Z][a-z]+)?"
-                                r"(IMD\d+)"
-                                r"(?P<uw>[A-Z]{2,3})?"       
-                                r"(?P<status>[A-Z]{2,4})"    
-                                r"(\d{2}[A-Za-z]{3}\d{4})"
-                                r"(\d{1,2}\.\d+%)"
-                                r"£([\d,]+\.\d{2})"
-                                r"£([\d,]+\.\d{2})"
-                            )
-
-                            match = re.search(pattern, combined.replace(" ", ""))
-                            if match:
-                                client = f"{match.group('first')} {match.group('last') or ''}".strip()
-                                policy_number = match.group(3)
-                                uw = match.group('uw') or ""
-                                status = match.group('status')
-                                start = match.group(6)
-                                rate = match.group(7)
-                                premium = f"£{match.group(8)}"
-                                commission = f"£{match.group(9)}"
-
-                                rows.append([
-                                    agent_id,
-                                    firm_name,
-                                    client,
-                                    policy_number,
-                                    uw,
-                                    status,
-                                    start,
-                                    rate,
-                                    premium,
-                                    commission
-                                ])
-                            else:
-                                fallback = [agent_id, firm_name] + row + [""] * (10 - len(row))
-                                rows.append(fallback[:10])
-
-                    all_rows.extend(rows)
-                    columns = [
-                        "Agent ID", "Firm Name", "Client", "Policy Number", "UW",
-                        "Status", "Start", "Rate", "Premium Exc. IPT", "Commission"
-                    ]
+                
 
                 elif provider == "CETA":
                     for page in pdf.pages:
