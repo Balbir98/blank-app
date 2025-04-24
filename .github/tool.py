@@ -12,10 +12,14 @@ Supported:
 - ✅ MetLife  
 - ✅ Aviva Healthcare  
 - ✅ CETA  
+- ✅ Accord BTL  
+- ✅ Medicash  
 """)
 
 uploaded_file = st.file_uploader("Upload your PDF", type=["pdf"])
-provider = st.selectbox("Select the Provider", ["Choose...", "Canada Life", "MetLife", "Aviva Healthcare", "CETA"])
+provider = st.selectbox("Select the Provider", [
+    "Choose...", "Canada Life", "MetLife", "Aviva Healthcare", "CETA", "Accord BTL", "Medicash", 
+])
 
 if st.button("RUN"):
     if uploaded_file is None or provider == "Choose...":
@@ -26,6 +30,7 @@ if st.button("RUN"):
 
             with pdfplumber.open(uploaded_file) as pdf:
                 if provider == "Canada Life":
+                    # (unchanged Canada Life logic)
                     current_intermediary = None
                     for page in pdf.pages:
                         text = page.extract_text()
@@ -58,6 +63,7 @@ if st.button("RUN"):
                     ]
 
                 elif provider == "MetLife":
+                    # (unchanged MetLife logic)
                     current_broker_id = ""
                     current_firm_name = ""
                     for page in pdf.pages:
@@ -111,6 +117,7 @@ if st.button("RUN"):
                     ]
 
                 elif provider == "Aviva Healthcare":
+                    # (unchanged Aviva logic)
                     for i, page in enumerate(pdf.pages):
                         table = page.extract_table()
                         if table:
@@ -121,19 +128,59 @@ if st.button("RUN"):
                         "FRQ", "Premium", "Type", "Comm %", "Comm Paid", "Agency Code"
                     ]
 
-                
-
                 elif provider == "CETA":
+                    # (unchanged CETA logic)
                     for page in pdf.pages:
                         table = page.extract_table()
                         if table:
                             data_rows = table[1:]
                             all_rows.extend(data_rows)
                     columns = [
-        "Master No", "Policy ID", "Client Name", "Type",
-        "Date", "Reason", "Insurer", "Premium", "Code", "Commission"
-    ]
+                        "Master No", "Policy ID", "Client Name", "Type",
+                        "Date", "Reason", "Insurer", "Premium", "Code", "Commission"
+                    ]
 
+                elif provider == "Accord BTL":
+                    # (unchanged Accord BTL logic)
+                    for page in pdf.pages:
+                        table = page.extract_table()
+                        if table:
+                            data_rows = table[1:]
+                            all_rows.extend(data_rows)
+                    columns = [
+                        "Broker Name", "Company Name", "FCA Reference", "Customer Surname",
+                        "Reference", "Product Transfer Date", "Account Balance", "Proc Fee Amount"
+                    ]
+
+                elif provider == "Medicash":
+                    # ---- Medicash logic ----
+                    first_page_text = pdf.pages[0].extract_text()
+                    firm_name = "Unknown Firm"
+                    if first_page_text:
+                        lines = [line.strip() for line in first_page_text.split('\n') if line.strip()]
+                        for line in lines:
+                            if (
+                                line.lower() not in ["commission statement", "date:", "month ending:"]
+                                and not re.match(r"date[:]?|month ending[:]?|commission statement", line, re.IGNORECASE)
+                                and len(line) > 2
+                            ):
+                                firm_name = line
+                                break
+                    for page in pdf.pages:
+                        table = page.extract_table()
+                        if table:
+                            if len(table) > 1 and "Policy/Group number" in table[0][0]:
+                                data_rows = table[1:]  # skip header
+                                for row in data_rows:
+                                    all_rows.append([firm_name] + row)
+                                break
+                    columns = [
+                        "Firm Name",
+                        "Policy/Group number", "Policyholder/Group Name",
+                        "Premium rec'd", "IPT deduction", "Rate", "Commission due"
+                    ]
+
+                
 
             if not all_rows:
                 st.warning("⚠️ No data rows were found.")
