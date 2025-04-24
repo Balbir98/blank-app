@@ -14,6 +14,7 @@ Supported:
 - ✅ CETA  
 - ✅ Accord BTL  
 - ✅ Medicash  
+
 """)
 
 uploaded_file = st.file_uploader("Upload your PDF", type=["pdf"])
@@ -30,7 +31,6 @@ if st.button("RUN"):
 
             with pdfplumber.open(uploaded_file) as pdf:
                 if provider == "Canada Life":
-                    # (unchanged Canada Life logic)
                     current_intermediary = None
                     for page in pdf.pages:
                         text = page.extract_text()
@@ -63,7 +63,6 @@ if st.button("RUN"):
                     ]
 
                 elif provider == "MetLife":
-                    # (unchanged MetLife logic)
                     current_broker_id = ""
                     current_firm_name = ""
                     for page in pdf.pages:
@@ -117,7 +116,6 @@ if st.button("RUN"):
                     ]
 
                 elif provider == "Aviva Healthcare":
-                    # (unchanged Aviva logic)
                     for i, page in enumerate(pdf.pages):
                         table = page.extract_table()
                         if table:
@@ -129,7 +127,6 @@ if st.button("RUN"):
                     ]
 
                 elif provider == "CETA":
-                    # (unchanged CETA logic)
                     for page in pdf.pages:
                         table = page.extract_table()
                         if table:
@@ -141,7 +138,6 @@ if st.button("RUN"):
                     ]
 
                 elif provider == "Accord BTL":
-                    # (unchanged Accord BTL logic)
                     for page in pdf.pages:
                         table = page.extract_table()
                         if table:
@@ -153,7 +149,6 @@ if st.button("RUN"):
                     ]
 
                 elif provider == "Medicash":
-                    # ---- Medicash logic ----
                     first_page_text = pdf.pages[0].extract_text()
                     firm_name = "Unknown Firm"
                     if first_page_text:
@@ -168,12 +163,11 @@ if st.button("RUN"):
                                 break
                     for page in pdf.pages:
                         table = page.extract_table()
-                        if table:
-                            if len(table) > 1 and "Policy/Group number" in table[0][0]:
-                                data_rows = table[1:]  # skip header
-                                for row in data_rows:
-                                    all_rows.append([firm_name] + row)
-                                break
+                        if table and "Policy/Group number" in table[0][0]:
+                            data_rows = table[1:]
+                            for row in data_rows:
+                                all_rows.append([firm_name] + row)
+                            break
                     columns = [
                         "Firm Name",
                         "Policy/Group number", "Policyholder/Group Name",
