@@ -16,12 +16,13 @@ Supported:
 - ✅ Medicash
 - ✅ Cigna (Once exported, enter in the Firm Name and Broker Reference to the spreadsheet.)
 - ✅ DenPlan
+- ✅ National Friendly
  """)
 
 uploaded_file = st.file_uploader("Upload your PDF", type=["pdf"])
 provider = st.selectbox("Select the Provider", [
     "Choose...", "Canada Life", "MetLife", "Aviva Healthcare", "CETA", "Accord BTL", "Medicash", "Cigna"
-, "DenPlan"])
+, "DenPlan", "National Friendly"])
 
 if st.button("RUN"):
     if uploaded_file is None or provider == "Choose...":
@@ -270,6 +271,42 @@ if st.button("RUN"):
                         "Type", "Start Date", "Payment Received",
                         "Commission Rate", "Commission Amount"
                     ]
+                elif provider == "National Friendly":
+                    # Define your columns
+                    columns = [
+                        "Company Name", "Product", "Plan No", "Member No", "Member Name",
+                        "FC No", "Agent", "UW", "Annual Premium", "Commission Rate",
+                        "Commission £", "1st Premium Received", "Issue Date", "Clawback Period (Mths)"
+                    ]
+                    all_rows = []
+                    for page in pdf.pages:
+                        table = page.extract_table()
+                        if table:
+                            header_row = None
+                            for idx, row in enumerate(table):
+                                # Find the header row by checking for column names
+                                if row and "Company Name" in row[0]:
+                                    header_row = idx
+                                    break
+                            if header_row is not None:
+                                for row in table[header_row+1:]:
+                                    # Skip blank or summary lines
+                                    if not row or not row[0] or "Total Payable" in row[0]:
+                                        continue
+                                    # Fix common issues with Annual Premium/Commission Rate
+                                    # Sometimes the cells get merged or split, so clean up
+                                    if len(row) > len(columns):
+                                        # Try to merge back split columns
+                                        row = row[:8] + [' '.join(row[8:-5])] + row[-5:]
+                                    if len(row) < len(columns):
+                                        # If still short, pad
+                                        row += [''] * (len(columns) - len(row))
+                                    # Remove stray letters like "ng" from Commission Rate
+                                    row[9] = re.sub(r'[^\d.%]', '', row[9])
+                                    # Remove any extra characters from Annual Premium
+                                    row[8] = re.sub(r'[^\d.,£]', '', row[8])
+                                    all_rows.append(row)
+                                break 
 
 
 
