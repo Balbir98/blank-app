@@ -15,7 +15,7 @@ Supported:
 - ✅ Accord BTL  
 - ✅ Medicash
 - ✅ Cigna (Once exported, enter in the Firm Name and Broker Reference to the spreadsheet.)
-
+- ✅ DenPlan
  """)
 
 uploaded_file = st.file_uploader("Upload your PDF", type=["pdf"])
