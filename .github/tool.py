@@ -14,13 +14,14 @@ Supported:
 - ✅ CETA  
 - ✅ Accord BTL  
 - ✅ Medicash
-- ✅ Cigna
-""")
+- ✅ Cigna (Once exported, enter in the Firm Name and Broker Reference to the spreadsheet.)
+
+ """)
 
 uploaded_file = st.file_uploader("Upload your PDF", type=["pdf"])
 provider = st.selectbox("Select the Provider", [
     "Choose...", "Canada Life", "MetLife", "Aviva Healthcare", "CETA", "Accord BTL", "Medicash", "Cigna"
-])
+, "DenPlan"])
 
 if st.button("RUN"):
     if uploaded_file is None or provider == "Choose...":
@@ -209,8 +210,66 @@ if st.button("RUN"):
                         "Premium Due Date", "Premium Paid Date",
                         "Premium Paid (Inc Tax)", "Commission Percent", "Commission Amount"
                     ]
+                elif provider == "DenPlan":
+                    broker_ref = ""
+                    broker_name = ""
 
+                    # Extract Broker Ref and Broker Name from header
+                    first_page_text = pdf.pages[0].extract_text()
+                    if first_page_text:
+                        for line in first_page_text.split("\n"):
+                            if "Broker Ref:" in line:
+                                broker_ref = line.split("Broker Ref:")[1].strip().split()[0]  # just number
+                            if "Broker Name:" in line:
+                                broker_name = line.split("Broker Name:")[1].strip()
 
+                    for page in pdf.pages:
+                        text = page.extract_text()
+                        if not text:
+                            continue
+                        lines = text.split("\n")
+                        start = False
+                        for line in lines:
+                            if line.strip().startswith("Group Ref and Name"):
+                                start = True
+                                continue
+                            if not start or not line.strip():
+                                continue
+                            if "Total Paid" in line or line.strip() == "":
+                                break
+                            if not line.strip().startswith("GR"):
+                                continue
+
+                            parts = line.strip().split()
+                            if len(parts) < 8:
+                                continue  # not enough data
+
+                            # **ALWAYS take the last 5 columns as rightmost fields**
+                            # (commission_amount, commission_rate, payment_received, start_date, type_val)
+                            commission_amount = parts[-1]
+                            commission_rate = parts[-2]
+                            payment_received = parts[-3]
+                            start_date = parts[-4]
+                            type_val = parts[-5]
+                            # Everything before that = group ref and name
+                            group_ref_and_name = " ".join(parts[:-5])
+
+                            all_rows.append([
+                                broker_ref,
+                                broker_name,
+                                group_ref_and_name,
+                                type_val,
+                                start_date,
+                                payment_received,
+                                commission_rate,
+                                commission_amount
+                            ])
+
+                    columns = [
+                        "Broker Ref", "Broker Name", "Group Ref and Name",
+                        "Type", "Start Date", "Payment Received",
+                        "Commission Rate", "Commission Amount"
+                    ]
 
 
 
