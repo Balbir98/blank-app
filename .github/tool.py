@@ -13,13 +13,13 @@ Supported:
 - ✅ Aviva Healthcare  
 - ✅ CETA  
 - ✅ Accord BTL  
-- ✅ Medicash  
-
+- ✅ Medicash
+- ✅ Cigna
 """)
 
 uploaded_file = st.file_uploader("Upload your PDF", type=["pdf"])
 provider = st.selectbox("Select the Provider", [
-    "Choose...", "Canada Life", "MetLife", "Aviva Healthcare", "CETA", "Accord BTL", "Medicash", 
+    "Choose...", "Canada Life", "MetLife", "Aviva Healthcare", "CETA", "Accord BTL", "Medicash", "Cigna"
 ])
 
 if st.button("RUN"):
@@ -173,8 +173,46 @@ if st.button("RUN"):
                         "Policy/Group number", "Policyholder/Group Name",
                         "Premium rec'd", "IPT deduction", "Rate", "Commission due"
                     ]
+                elif provider == "Cigna":
+                    firm_name = ""
+                    broker_ref = ""
+                    for page in pdf.pages:
+                        text = page.extract_text()
+                        if text:
+                            for line in text.split('\n'):
+                                if "Account Name:" in line:
+                                    firm_name = line.split("Account Name:")[1].strip()
+                                if "Broker Reference Number:" in line:
+                                    broker_ref = line.split("Broker Reference Number:")[1].strip()
+                        table = page.extract_table()
+                        if table:
+                            headers = table[0]
+                            for row in table[1:]:
+                                # Skip rows that are not table data
+                                if not row or len(row) < 8 or "Total Commission Due" in row[0]:
+                                    continue
+                                all_rows.append([
+                                    firm_name,
+                                    broker_ref,
+                                    row[0],  # Policy Number
+                                    row[1],  # Policyholder
+                                    row[2],  # Transaction No
+                                    row[3],  # Premium Due Date
+                                    row[4],  # Premium Paid Date
+                                    row[5],  # Premium Paid (Inc Tax)
+                                    row[6],  # Commission Percent
+                                    row[7],  # Commission Amount
+                                ])
+                    columns = [
+                        "Firm Name", "Broker Reference Number",
+                        "Policy Number", "Policyholder", "Transaction No",
+                        "Premium Due Date", "Premium Paid Date",
+                        "Premium Paid (Inc Tax)", "Commission Percent", "Commission Amount"
+                    ]
 
-                
+
+
+
 
             if not all_rows:
                 st.warning("⚠️ No data rows were found.")
