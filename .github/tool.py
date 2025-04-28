@@ -17,12 +17,13 @@ Supported:
 - ✅ Cigna (Once exported, enter in the Firm Name and Broker Reference to the spreadsheet.)
 - ✅ DenPlan
 - ✅ National Friendly
+         
  """)
 
 uploaded_file = st.file_uploader("Upload your PDF", type=["pdf"])
 provider = st.selectbox("Select the Provider", [
     "Choose...", "Canada Life", "MetLife", "Aviva Healthcare", "CETA", "Accord BTL", "Medicash", "Cigna"
-, "DenPlan", "National Friendly"])
+, "DenPlan", "National Friendly" ])
 
 if st.button("RUN"):
     if uploaded_file is None or provider == "Choose...":
@@ -307,9 +308,9 @@ if st.button("RUN"):
                                     row[8] = re.sub(r'[^\d.,£]', '', row[8])
                                     all_rows.append(row)
                                 break 
+                
 
-
-
+                                
             if not all_rows:
                 st.warning("⚠️ No data rows were found.")
             else:
