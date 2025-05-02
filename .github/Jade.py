@@ -5,12 +5,12 @@ import io
 import re
 from datetime import datetime
 
-st.title("Bank Statement PDF Extractor")
-
+st.title("📄 Bank Statement PDF Extractor")
+st.markdown(""" Upload a Bank Statement and Select the Provider """)
 uploaded_file = st.file_uploader("Upload a bank statement PDF", type=["pdf"])
-bank_account = st.selectbox("Select Bank Account", ["-- Select --", "Bank Account 1"])
+bank_account = st.selectbox("Select Bank Account", ["-- Select --", "Transfer Wise"])
 
-if uploaded_file and bank_account == "Bank Account 1":
+if uploaded_file and bank_account == "Transfer Wise":
     with pdfplumber.open(uploaded_file) as pdf:
         records = []
 
@@ -85,7 +85,7 @@ if uploaded_file and bank_account == "Bank Account 1":
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 df.to_excel(writer, index=False, sheet_name='Transactions')
             st.download_button(
-                label="Download Excel File",
+                label="📥 Download Excel File",
                 data=output.getvalue(),
                 file_name="bank_account_1_transactions.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
