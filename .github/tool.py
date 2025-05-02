@@ -23,7 +23,7 @@ Supported:
 uploaded_file = st.file_uploader("Upload your PDF", type=["pdf"])
 provider = st.selectbox("Select the Provider", [
     "Choose...", "Canada Life", "MetLife", "Aviva Healthcare", "CETA", "Accord BTL", "Medicash", "Cigna"
-, "DenPlan", "National Friendly" ])
+, "DenPlan", "National Friendly" , "INET"])
 
 if st.button("RUN"):
     if uploaded_file is None or provider == "Choose...":
@@ -309,6 +309,34 @@ if st.button("RUN"):
                                     all_rows.append(row)
                                 break 
                 
+                elif provider == "INET":
+                    agent_id = ""
+                    firm_name = ""
+                    for page in pdf.pages:
+                        text = page.extract_text()
+                        if not text:
+                            continue
+
+                        lines = text.split("\n")
+                        for line in lines:
+                            if line.startswith("Agent"):
+                                agent_match = re.search(r"Agent\s*\((.*?)\)\s*(.*)", line)
+                                if agent_match:
+                                    agent_id = agent_match.group(1).strip()
+                                    firm_name = agent_match.group(2).strip()
+
+                        # Look for table and capture rows from it
+                        table = page.extract_table()
+                        if table:
+                            for row in table[1:]:  # Skip headers
+                                if len(row) >= 8:
+                                    all_rows.append([agent_id, firm_name] + row)
+
+                    columns = [
+                        "Agent ID", "Firm Name", "Client", "Policy Number", "UW", "Status",
+                        "Start", "Rate", "Premium Exc. IPT", "Commission"
+                    ]
+
 
                                 
             if not all_rows:
