@@ -3,4 +3,3 @@ pandas
 pdfplumber
 xlsxwriter
 openpyxl
-win32com.client
