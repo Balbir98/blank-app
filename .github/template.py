@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import io
 from openpyxl import load_workbook
-from openpyxl.styles import numbers
+from openpyxl.styles import numbers, Font
 from datetime import datetime
 import zipfile
 import os
@@ -47,8 +47,8 @@ if raw_data_file and template_file:
                     ws = wb.active
 
                     # Set header data
-                    ws["B2"] = firm  # Firm name moved to B2
-                    ws["C2"] = firm_data["Date Paid to AR"].iloc[0].date() if pd.notnull(firm_data["Date Paid to AR"].iloc[0]) else ""  # Date moved to C2
+                    ws["B2"] = firm  # Firm name in B2
+                    ws["B3"] = firm_data["Date Paid to AR"].iloc[0].date() if pd.notnull(firm_data["Date Paid to AR"].iloc[0]) else ""  # Date in B3
 
                     # Start writing from row 7 (after header)
                     start_row = 7
@@ -64,6 +64,10 @@ if raw_data_file and template_file:
 
                         commission_cell = ws.cell(row=start_row, column=9, value=row["Commission Payable"])
                         commission_cell.number_format = u"\u00a3#,##0.00"  # Format as GBP currency
+
+                        # Match font of first row
+                        sample_font = ws.cell(row=7, column=1).font
+                        commission_cell.font = Font(name=sample_font.name, size=sample_font.size, bold=sample_font.bold)
 
                         start_row += 1
 
