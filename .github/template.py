@@ -7,6 +7,11 @@ from datetime import datetime
 import zipfile
 import os
 import time
+import tempfile
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email.mime.text import MIMEText
+from email import encoders
 
 st.title("Commission Statement Generator")
 
@@ -23,7 +28,6 @@ if raw_data_file and template_file:
         start_time = time.time()
         raw_df = pd.read_excel(raw_data_file)
 
-        # Check required columns exist
         expected_columns = [
             "Principal/Adviser Email Address", "AR Firm Name", "Adviser Name", "Date of Statement",
             "Lender", "Policy Reference", "Product Type", "Client First Name", "Client Surname",
@@ -38,19 +42,19 @@ if raw_data_file and template_file:
             progress_bar = st.progress(0)
             status_text = st.empty()
             zip_buffer = io.BytesIO()
+            eml_zip_buffer = io.BytesIO()
 
-            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf, \
+                 zipfile.ZipFile(eml_zip_buffer, "w", zipfile.ZIP_DEFLATED) as eml_zip:
                 for i, firm in enumerate(unique_firms):
                     firm_data = raw_df[raw_df["AR Firm Name"] == firm].sort_values(by="Adviser Name")
-                    template_file.seek(0)  # Reset pointer to read template for each firm
+                    template_file.seek(0)
                     wb = load_workbook(template_file)
                     ws = wb.active
 
-                    # Set header data
-                    ws["B2"] = firm  # Firm name in B2
-                    ws["B3"] = firm_data["Date Paid to AR"].iloc[0].date() if pd.notnull(firm_data["Date Paid to AR"].iloc[0]) else ""  # Date in B3
+                    ws["B2"] = firm
+                    ws["B3"] = firm_data["Date Paid to AR"].iloc[0].date() if pd.notnull(firm_data["Date Paid to AR"].iloc[0]) else ""
 
-                    # Start writing from row 7 (after header)
                     start_row = 7
                     for idx, row in firm_data.iterrows():
                         ws.cell(row=start_row, column=1, value=row["Adviser Name"])
@@ -63,27 +67,56 @@ if raw_data_file and template_file:
                         ws.cell(row=start_row, column=8, value=row["Class"])
 
                         commission_cell = ws.cell(row=start_row, column=9, value=row["Commission Payable"])
-                        commission_cell.number_format = u"\u00a3#,##0.00"  # Format as GBP currency
-
-                        # Match font of first row
+                        commission_cell.number_format = u"\u00a3#,##0.00"
                         sample_font = ws.cell(row=7, column=1).font
                         commission_cell.font = Font(name=sample_font.name, size=sample_font.size, bold=sample_font.bold)
 
                         start_row += 1
 
-                    # Save output to in-memory buffer
                     output_buffer = io.BytesIO()
                     wb.save(output_buffer)
                     output_buffer.seek(0)
 
                     filename = f"Statement_{firm.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.xlsx"
-                    zipf.writestr(filename, output_buffer.read())
+                    zipf.writestr(filename, output_buffer.getvalue())
+
+                    # Build .eml email draft with recipient and X-Unsent header to keep it as draft
+                    recipient = firm_data["Principal/Adviser Email Address"].iloc[0]
+                    subject = f"Commission Statement - {firm}"
+                    body = (
+                        f"Dear Adviser,\n\n"
+                        f"Please find attached the latest commission statement for your firm: {firm}.\n\n"
+                        f"If you have any questions, feel free to get in touch.\n\n"
+                        f"Best regards,\nYour Finance Team"
+                    )
+
+                    msg = MIMEMultipart()
+                    msg["To"] = recipient
+                    msg["Subject"] = subject
+                    msg.add_header("X-Unsent", "1")  # Marks as draft in Outlook
+                    msg.attach(MIMEText(body, "plain"))
+
+                    part = MIMEBase("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    part.set_payload(output_buffer.getvalue())
+                    encoders.encode_base64(part)
+                    part.add_header("Content-Disposition", f"attachment; filename=\"{filename}\"")
+                    msg.attach(part)
+
+                    eml_filename = f"Email_{firm.replace(' ', '_')}.eml"
+                    eml_io = io.BytesIO()
+                    from email.generator import BytesGenerator
+                    gen = BytesGenerator(eml_io)
+                    gen.flatten(msg)
+                    eml_io.seek(0)
+                    eml_zip.writestr(eml_filename, eml_io.read())
 
                     elapsed = time.time() - start_time
                     progress_bar.progress((i + 1) / total_firms)
                     status_text.text(f"Processed {i + 1} of {total_firms} firms in {elapsed:.2f} seconds")
 
             zip_buffer.seek(0)
+            eml_zip_buffer.seek(0)
+
             st.download_button(
                 label="Download All Statements as ZIP",
                 data=zip_buffer,
@@ -91,5 +124,12 @@ if raw_data_file and template_file:
                 mime="application/zip"
             )
 
+            st.download_button(
+                label="Download Draft Emails as EML ZIP",
+                data=eml_zip_buffer,
+                file_name="All_Email_Drafts.zip",
+                mime="application/zip"
+            )
+
             total_time = time.time() - start_time
-            st.success(f"All statements generated successfully in {total_time:.2f} seconds!")
+            st.success(f"All statements and email drafts generated successfully in {total_time:.2f} seconds!")
