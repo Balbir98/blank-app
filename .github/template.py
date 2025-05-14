@@ -51,10 +51,8 @@ if raw_data_file and template_file:
                     template_file.seek(0)
                     wb = load_workbook(template_file)
                     ws = wb.active
-
                     ws["B2"] = firm
                     ws["B3"] = firm_data["Date Paid to AR"].iloc[0].date() if pd.notnull(firm_data["Date Paid to AR"].iloc[0]) else ""
-
                     start_row = 7
                     for idx, row in firm_data.iterrows():
                         ws.cell(row=start_row, column=1, value=row["Adviser Name"])
@@ -65,36 +63,38 @@ if raw_data_file and template_file:
                         ws.cell(row=start_row, column=6, value=row["Client First Name"])
                         ws.cell(row=start_row, column=7, value=row["Client Surname"])
                         ws.cell(row=start_row, column=8, value=row["Class"])
-
                         commission_cell = ws.cell(row=start_row, column=9, value=row["Commission Payable"])
                         commission_cell.number_format = u"\u00a3#,##0.00"
                         sample_font = ws.cell(row=7, column=1).font
                         commission_cell.font = Font(name=sample_font.name, size=sample_font.size, bold=sample_font.bold)
-
                         start_row += 1
-
                     output_buffer = io.BytesIO()
                     wb.save(output_buffer)
                     output_buffer.seek(0)
-
                     filename = f"Statement_{firm.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.xlsx"
                     zipf.writestr(filename, output_buffer.getvalue())
 
-                    # Build .eml email draft with recipient and X-Unsent header to keep it as draft
                     recipient = firm_data["Principal/Adviser Email Address"].iloc[0]
                     subject = f"Commission Statement - {firm}"
-                    body = (
-                        f"Dear Adviser,\n\n"
-                        f"Please find attached the latest commission statement for your firm: {firm}.\n\n"
-                        f"If you have any questions, feel free to get in touch.\n\n"
-                        f"Best regards,\nYour Finance Team"
-                    )
+                    html_body = f"""
+                        <html>
+                            <body>
+                                <p>Dear Adviser,</p>
+                                <p>Please find attached the latest commission statement for your firm: <strong>{firm}</strong>.</p>
+                                <p>If you have any questions, feel free to get in touch.</p>
+                                <p>Best regards!</p>
+                            </body>
+                        </html>
+                    """
 
-                    msg = MIMEMultipart()
+                    msg = MIMEMultipart("mixed")
                     msg["To"] = recipient
                     msg["Subject"] = subject
-                    msg.add_header("X-Unsent", "1")  # Marks as draft in Outlook
-                    msg.attach(MIMEText(body, "plain"))
+                    msg.add_header("X-Unsent", "1")
+
+                    alt_part = MIMEMultipart("alternative")
+                    alt_part.attach(MIMEText(html_body, "html"))
+                    msg.attach(alt_part)
 
                     part = MIMEBase("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                     part.set_payload(output_buffer.getvalue())
@@ -116,20 +116,17 @@ if raw_data_file and template_file:
 
             zip_buffer.seek(0)
             eml_zip_buffer.seek(0)
-
             st.download_button(
                 label="Download All Statements as ZIP",
                 data=zip_buffer,
                 file_name="All_Commission_Statements.zip",
                 mime="application/zip"
             )
-
             st.download_button(
                 label="Download Draft Emails as EML ZIP",
                 data=eml_zip_buffer,
                 file_name="All_Email_Drafts.zip",
                 mime="application/zip"
             )
-
             total_time = time.time() - start_time
             st.success(f"All statements and email drafts generated successfully in {total_time:.2f} seconds!")
