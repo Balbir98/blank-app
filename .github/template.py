@@ -51,26 +51,31 @@ if raw_data_file and template_file:
                     template_file.seek(0)
                     wb = load_workbook(template_file)
                     ws = wb.active
-                    ws["B2"] = firm
-                    ws["B3"] = firm_data["Date Paid to AR"].iloc[0].date() if pd.notnull(firm_data["Date Paid to AR"].iloc[0]) else ""
+
+                    # Updated cell positions
+                    ws["A4"] = firm
+                    ws["H5"] = firm_data["Date Paid to AR"].iloc[0].date() if pd.notnull(firm_data["Date Paid to AR"].iloc[0]) else ""
+
                     start_row = 7
                     for idx, row in firm_data.iterrows():
-                        ws.cell(row=start_row, column=1, value=row["Adviser Name"])
-                        ws.cell(row=start_row, column=2, value=row["Date of Statement"].date() if pd.notnull(row["Date of Statement"]) else "")
-                        ws.cell(row=start_row, column=3, value=row["Lender"])
-                        ws.cell(row=start_row, column=4, value=row["Policy Reference"])
-                        ws.cell(row=start_row, column=5, value=row["Product Type"])
-                        ws.cell(row=start_row, column=6, value=row["Client First Name"])
-                        ws.cell(row=start_row, column=7, value=row["Client Surname"])
-                        ws.cell(row=start_row, column=8, value=row["Class"])
+                        data_font = Font(name="Calibri", size=8, bold=False)
+                        ws.cell(row=start_row, column=1, value=row["Adviser Name"]).font = data_font
+                        ws.cell(row=start_row, column=2, value=row["Date of Statement"].date() if pd.notnull(row["Date of Statement"]) else "").font = data_font
+                        ws.cell(row=start_row, column=3, value=row["Lender"]).font = data_font
+                        ws.cell(row=start_row, column=4, value=row["Policy Reference"]).font = data_font
+                        ws.cell(row=start_row, column=5, value=row["Product Type"]).font = data_font
+                        ws.cell(row=start_row, column=6, value=row["Client First Name"]).font = data_font
+                        ws.cell(row=start_row, column=7, value=row["Client Surname"]).font = data_font
+                        ws.cell(row=start_row, column=8, value=row["Class"]).font = data_font
                         commission_cell = ws.cell(row=start_row, column=9, value=row["Commission Payable"])
                         commission_cell.number_format = u"\u00a3#,##0.00"
-                        sample_font = ws.cell(row=7, column=1).font
-                        commission_cell.font = Font(name=sample_font.name, size=sample_font.size, bold=sample_font.bold)
+                        commission_cell.font = data_font
                         start_row += 1
+
                     output_buffer = io.BytesIO()
                     wb.save(output_buffer)
                     output_buffer.seek(0)
+
                     filename = f"Statement_{firm.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.xlsx"
                     zipf.writestr(filename, output_buffer.getvalue())
 
@@ -82,7 +87,7 @@ if raw_data_file and template_file:
                                 <p>Dear Adviser,</p>
                                 <p>Please find attached the latest commission statement for your firm: <strong>{firm}</strong>.</p>
                                 <p>If you have any questions, feel free to get in touch.</p>
-                                <p>Best regards!</p>
+                                <p>Best regards,<br>Your Finance Team</p>
                             </body>
                         </html>
                     """
