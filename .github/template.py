@@ -13,14 +13,14 @@ from email.mime.base import MIMEBase
 from email.mime.text import MIMEText
 from email import encoders
 
-st.title("Commission Statement Generator")
+st.title("📄Commission Statement Generator 📄")
 
 st.markdown("""
-Upload the **raw commission data** and the **Excel template** to begin.
-This tool will generate one statement per AR Firm.
+Upload the **Zoho Analytics Commission Data** and the **Excel template** to begin.
+This tool will generate one statement per AR Firm!
 """)
 
-raw_data_file = st.file_uploader("Upload Raw Commission Data (Excel)", type=["xlsx"], key="raw")
+raw_data_file = st.file_uploader("Upload Zoho Analytics Commission Data (Excel)", type=["xlsx"], key="raw")
 template_file = st.file_uploader("Upload Commission Statement Template (Excel)", type=["xlsx"], key="template")
 
 if raw_data_file and template_file:
@@ -80,14 +80,16 @@ if raw_data_file and template_file:
                     zipf.writestr(filename, output_buffer.getvalue())
 
                     recipient = firm_data["Principal/Adviser Email Address"].iloc[0]
+                    recipient = recipient if pd.notnull(recipient) else ""
+
                     subject = f"Commission Statement - {firm}"
                     html_body = f"""
                         <html>
                             <body>
-                                <p>Dear Adviser,</p>
-                                <p>Please find attached the latest commission statement for your firm: <strong>{firm}</strong>.</p>
+                                <p>Dear Firm Manager,</p>
+                                <p>Please find attached the latest commission statement for: <strong>{firm}</strong>.</p>
                                 <p>If you have any questions, feel free to get in touch.</p>
-                                <p>Best regards,<br>Your Finance Team</p>
+                                <p>Best regards!</p>
                             </body>
                         </html>
                     """
