@@ -199,6 +199,89 @@ if raw_data_file and template_file:
                         elapsed = time.time() - start_time
                         progress_bar.progress((i + 1) / total_firms)
                         status_text.text(f"Processed {i + 1} of {total_firms} advisers in {elapsed:.2f} seconds")
+            elif statement_type == "TRB - Introducers":
+                            column_mapping = {
+                                "Adviser": "Adviser",
+                                "Date Received": "Date",
+                                "Lender": "Lenders",
+                                "Policy Number": "Policy reference",
+                                "Product Type": "Type",
+                                "Client First Name": "First name",
+                                "Client Surname": "Surname",
+                                "Class": "Class",
+                                "Introducer Commission": "Commission"
+                            }
+                            if not all(col in raw_df.columns for col in column_mapping.keys()):
+                                st.error("The raw TRB Introducers data is missing one or more required columns.")
+                            else:
+                                introducers = raw_df["Introducer"].dropna().unique()
+                                total_firms = len(introducers)
+                                progress_bar = st.progress(0)
+                                status_text = st.empty()
+                                for i, introducer in enumerate(introducers):
+                                    introducer_data = raw_df[raw_df["Introducer"] == introducer].copy()
+                                    introducer_data = introducer_data.sort_values(by="Date Received")
+                                    template_file.seek(0)
+                                    wb = load_workbook(template_file)
+                                    ws = wb.active
+                                    ws["A4"] = introducer
+                                    ws["H5"] = introducer_data.iloc[0]["Date Paid to Introducer"].strftime("%d/%m/%Y") if "Date Paid to Introducer" in introducer_data.columns and pd.notnull(introducer_data.iloc[0]["Date Paid to Introducer"]) else ""
+                                    start_row = 7
+                                    for idx, row in introducer_data.iterrows():
+                                        data_font = Font(name="Calibri", size=8, bold=False)
+                                        for col_index, (src_col, dst_col) in enumerate(column_mapping.items(), start=1):
+                                            if "Date" in src_col and pd.notnull(row[src_col]):
+                                                value = row[src_col].strftime("%d/%m/%Y")
+                                            else:
+                                                value = row[src_col]
+                                            cell = ws.cell(row=start_row, column=col_index, value=value)
+                                            cell.font = data_font
+                                            if dst_col.lower() == "policy reference":
+                                                cell.alignment = Alignment(horizontal="left")
+                                        start_row += 1
+                                    output_buffer = io.BytesIO()
+                                    wb.save(output_buffer)
+                                    output_buffer.seek(0)
+                                    total_commission = introducer_data['Introducer Commission'].sum()
+                                    total_str = f"£{total_commission:,.2f}"
+                                    filename = f"TRB_Introducer_Statement_{introducer.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}_{total_str}.xlsx"
+                                    zipf.writestr(filename, output_buffer.getvalue())
+                                    msg = MIMEMultipart("mixed")
+                                    recipient = introducer_data["Introducer Email"].iloc[0] if "Introducer Email" in introducer_data.columns and pd.notnull(introducer_data["Introducer Email"].iloc[0]) else ""
+                                    msg["To"] = recipient
+                                    msg["Subject"] = f"Commission Statement - {introducer}"
+                                    msg.add_header("X-Unsent", "1")
+                                    html_body = f"""
+                                        <html>
+                                            <body>
+                                                <p>Attached is your commission statement for this run.</p>
+                                                <p><strong>Referred cases</strong><br>
+                                                Please check that the amount paid is correct to ensure that amendments don’t need to be deducted at a later date</p>
+                                                <p><strong>ACRE tips and hints:</strong><br>
+                                                All cases must have an accounting line in order to be paid.<br>
+                                                Proc fees must be at ‘exchanged’/‘complete’ to show for payment.<br>
+                                                Insurance must be at ‘complete’ to show for payment.</p>
+                                                <p>Should you have any queries, please let us know.</p>
+                                            </body>
+                                        </html>"""
+                                    alt_part = MIMEMultipart("alternative")
+                                    alt_part.attach(MIMEText(html_body, "html"))
+                                    msg.attach(alt_part)
+                                    from email.mime.application import MIMEApplication
+                                    part = MIMEApplication(output_buffer.getvalue(), _subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet", Name=filename)
+                                    encoders.encode_base64(part)
+                                    part.add_header("Content-Disposition", f"attachment; filename=\"{filename}\"")
+                                    msg.attach(part)
+                                    eml_filename = f"Email_TRB_Introducer_{introducer.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}_{total_str}.eml"
+                                    eml_io = io.BytesIO()
+                                    from email.generator import BytesGenerator
+                                    gen = BytesGenerator(eml_io)
+                                    gen.flatten(msg)
+                                    eml_io.seek(0)
+                                    eml_zip.writestr(eml_filename, eml_io.read())
+                                    elapsed = time.time() - start_time
+                                    progress_bar.progress((i + 1) / total_firms)
+                                    status_text.text(f"Processed {i + 1} of {total_firms} introducers in {elapsed:.2f} seconds")
 
         zip_buffer.seek(0)
         eml_zip_buffer.seek(0)
