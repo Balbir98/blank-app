@@ -144,7 +144,7 @@ if raw_data_file and template_file:
                         ws = wb.active
 
                         ws["A4"] = adviser
-                        ws["H5"] = adviser_data["Date Paid to AR"].iloc[0].strftime("%d/%m/%Y") if pd.notnull(adviser_data["Date Paid to AR"].iloc[0]) else ""
+                        ws["H5"] = adviser_data.iloc[0]["Date Paid to Adviser"].strftime("%d/%m/%Y") if "Date Paid to Adviser" in adviser_data.columns and pd.notnull(adviser_data.iloc[0]["Date Paid to Adviser"]) else ""
 
                         start_row = 7
                         for idx, row in adviser_data.iterrows():
