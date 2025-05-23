@@ -96,17 +96,12 @@ if raw_data_file and template_file:
                         msg["To"] = recipient
                         msg["Subject"] = subject
                         msg.add_header("X-Unsent", "1")
-                        part.add_header("Content-Disposition", f"attachment; filename=\"{filename}\"")
                         alt_part = MIMEMultipart("alternative")
                         alt_part.attach(MIMEText(html_body, "html"))
                         msg.attach(alt_part)
                         from email.mime.application import MIMEApplication
                         part = MIMEApplication(output_buffer.getvalue(), _subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet", Name=filename)
-                        part.set_payload(output_buffer.getvalue())
                         encoders.encode_base64(part)
-                        part.add_header("Content-Disposition", f"attachment; filename=\"{filename}\"")
-                        encoders.encode_base64(part)
-                        part.add_header("Content-Disposition", f"attachment; filename=\"{filename}\"")
                         part.add_header("Content-Disposition", f"attachment; filename=\"{filename}\"")
                         msg.attach(part)
                         eml_filename = f"Email_{firm.replace(' ', '_')}.eml"
@@ -132,7 +127,6 @@ if raw_data_file and template_file:
                     "Class": "Class",
                     "Adviser Commission": "Commission"
                 }
-
                 if not all(col in raw_df.columns for col in column_mapping.keys()):
                     st.error("The raw TRB data is missing one or more required columns.")
                 else:
@@ -140,17 +134,14 @@ if raw_data_file and template_file:
                     total_firms = len(advisers)
                     progress_bar = st.progress(0)
                     status_text = st.empty()
-
                     for i, adviser in enumerate(advisers):
                         adviser_data = raw_df[raw_df["Adviser"] == adviser].copy()
                         adviser_data = adviser_data.sort_values(by="Date Received")
                         template_file.seek(0)
                         wb = load_workbook(template_file)
                         ws = wb.active
-
                         ws["A4"] = adviser
                         ws["H5"] = adviser_data.iloc[0]["Date Paid to Adviser"].strftime("%d/%m/%Y") if "Date Paid to Adviser" in adviser_data.columns and pd.notnull(adviser_data.iloc[0]["Date Paid to Adviser"]) else ""
-
                         start_row = 7
                         for idx, row in adviser_data.iterrows():
                             data_font = Font(name="Calibri", size=8, bold=False)
@@ -164,32 +155,32 @@ if raw_data_file and template_file:
                                 if dst_col.lower() == "policy reference":
                                     cell.alignment = Alignment(horizontal="left")
                             start_row += 1
-
                         output_buffer = io.BytesIO()
                         wb.save(output_buffer)
                         output_buffer.seek(0)
-
                         total_commission = adviser_data['Adviser Commission'].sum()
                         total_str = f"£{total_commission:,.2f}"
                         filename = f"TRB_Statement_{adviser.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}_{total_str}.xlsx"
                         zipf.writestr(filename, output_buffer.getvalue())
-
                         msg = MIMEMultipart("mixed")
                         recipient = adviser_data["Email"].iloc[0] if "Email" in adviser_data.columns and pd.notnull(adviser_data["Email"].iloc[0]) else ""
                         msg["To"] = recipient
                         msg["Subject"] = f"Commission Statement - {adviser}"
                         msg.add_header("X-Unsent", "1")
-
                         html_body = f"""
                             <html>
                                 <body>
-                                    <p>Dear Adviser,</p>
-                                    <p>Please find attached your commission statement for: <strong>{adviser}</strong>.</p>
-                                    <p>If you have any questions, feel free to get in touch.</p>
-                                    <p>Best regards!</p>
+                                    <p>Dear {adviser}! </p>
+                                    <p>Attached is your commission statement for this run.</p>
+                                    <p><strong>Referred cases</strong><br>
+                                    Please check that the amount paid is correct to ensure that amendments don’t need to be deducted at a later date</p>
+                                    <p><strong>ACRE tips and hints:</strong><br>
+                                    All cases must have an accounting line in order to be paid.<br>
+                                    Proc fees must be at ‘exchanged’/‘complete’ to show for payment.<br>
+                                    Insurance must be at ‘complete’ to show for payment.</p>
+                                    <p>Should you have any queries, please let us know.</p>
                                 </body>
-                            </html>
-                        """
+                            </html>"""
                         alt_part = MIMEMultipart("alternative")
                         alt_part.attach(MIMEText(html_body, "html"))
                         msg.attach(alt_part)
