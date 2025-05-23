@@ -96,12 +96,17 @@ if raw_data_file and template_file:
                         msg["To"] = recipient
                         msg["Subject"] = subject
                         msg.add_header("X-Unsent", "1")
+                        part.add_header("Content-Disposition", f"attachment; filename=\"{filename}\"")
                         alt_part = MIMEMultipart("alternative")
                         alt_part.attach(MIMEText(html_body, "html"))
                         msg.attach(alt_part)
-                        part = MIMEBase("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                        from email.mime.application import MIMEApplication
+                        part = MIMEApplication(output_buffer.getvalue(), _subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet", Name=filename)
                         part.set_payload(output_buffer.getvalue())
                         encoders.encode_base64(part)
+                        part.add_header("Content-Disposition", f"attachment; filename=\"{filename}\"")
+                        encoders.encode_base64(part)
+                        part.add_header("Content-Disposition", f"attachment; filename=\"{filename}\"")
                         part.add_header("Content-Disposition", f"attachment; filename=\"{filename}\"")
                         msg.attach(part)
                         eml_filename = f"Email_{firm.replace(' ', '_')}.eml"
@@ -164,7 +169,9 @@ if raw_data_file and template_file:
                         wb.save(output_buffer)
                         output_buffer.seek(0)
 
-                        filename = f"TRB_Statement_{adviser.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+                        total_commission = adviser_data['Adviser Commission'].sum()
+                        total_str = f"£{total_commission:,.2f}"
+                        filename = f"TRB_Statement_{adviser.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}_{total_str}.xlsx"
                         zipf.writestr(filename, output_buffer.getvalue())
 
                         msg = MIMEMultipart("mixed")
@@ -186,12 +193,12 @@ if raw_data_file and template_file:
                         alt_part = MIMEMultipart("alternative")
                         alt_part.attach(MIMEText(html_body, "html"))
                         msg.attach(alt_part)
-                        part = MIMEBase("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                        part.set_payload(output_buffer.getvalue())
+                        from email.mime.application import MIMEApplication
+                        part = MIMEApplication(output_buffer.getvalue(), _subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet", Name=filename)
                         encoders.encode_base64(part)
                         part.add_header("Content-Disposition", f"attachment; filename=\"{filename}\"")
                         msg.attach(part)
-                        eml_filename = f"Email_TRB_{adviser.replace(' ', '_')}.eml"
+                        eml_filename = f"Email_TRB_{adviser.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}_{total_str}.eml"
                         eml_io = io.BytesIO()
                         from email.generator import BytesGenerator
                         gen = BytesGenerator(eml_io)
