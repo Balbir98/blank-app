@@ -52,15 +52,16 @@ if raw_data_file and template_file:
                     status_text = st.empty()
 
                     for i, firm in enumerate(unique_firms):
-                        firm_data = raw_df[raw_df["AR Firm Name"] == firm].sort_values(by="Adviser Name")
+                        firm_data = raw_df[raw_df["AR Firm Name"] == firm].sort_values(by=["Adviser Name", "Commission Payable"], ascending=[True, False])
                         template_file.seek(0)
                         wb = load_workbook(template_file)
                         ws = wb.active
                         ws["A4"] = firm
+                        paid_date = firm_data["Date Paid to AR"].iloc[0] if pd.notnull(firm_data["Date Paid to AR"].iloc[0]) else None
                         ws["H5"] = firm_data["Date Paid to AR"].iloc[0].date() if pd.notnull(firm_data["Date Paid to AR"].iloc[0]) else ""
                         start_row = 7
                         for idx, row in firm_data.iterrows():
-                            data_font = Font(name="Calibri", size=8, bold=False)
+                            data_font = Font(name="Calibri", size=9, bold=False)
                             ws.cell(row=start_row, column=1, value=row["Adviser Name"]).font = data_font
                             ws.cell(row=start_row, column=2, value=row["Date of Statement"].date() if pd.notnull(row["Date of Statement"]) else "").font = data_font
                             ws.cell(row=start_row, column=3, value=row["Lender"]).font = data_font
@@ -77,7 +78,8 @@ if raw_data_file and template_file:
                         output_buffer = io.BytesIO()
                         wb.save(output_buffer)
                         output_buffer.seek(0)
-                        filename = f"Statement_{firm.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+                        formatted_date = paid_date.strftime("%d-%m-%Y") if paid_date else datetime.now().strftime("%d-%m-%Y")
+                        filename = f"{firm} {formatted_date}.xlsx"
                         zipf.writestr(filename, output_buffer.getvalue())
                         recipient = firm_data["Principal/Adviser Email Address"].iloc[0]
                         recipient = recipient if pd.notnull(recipient) else ""
@@ -136,11 +138,12 @@ if raw_data_file and template_file:
                     status_text = st.empty()
                     for i, adviser in enumerate(advisers):
                         adviser_data = raw_df[raw_df["Adviser"] == adviser].copy()
-                        adviser_data = adviser_data.sort_values(by="Date Received")
+                        adviser_data = adviser_data.sort_values(by="Commission",ascending = False)
                         template_file.seek(0)
                         wb = load_workbook(template_file)
                         ws = wb.active
                         ws["A4"] = adviser
+                        paid_date = adviser_data.iloc[0]["Date Paid to Adviser"] if "Date Paid to Adviser" in adviser_data.columns and pd.notnull(adviser_data.iloc[0]["Date Paid to Adviser"]) else None
                         ws["H5"] = adviser_data.iloc[0]["Date Paid to Adviser"].strftime("%d/%m/%Y") if "Date Paid to Adviser" in adviser_data.columns and pd.notnull(adviser_data.iloc[0]["Date Paid to Adviser"]) else ""
                         start_row = 7
                         for idx, row in adviser_data.iterrows():
@@ -160,7 +163,8 @@ if raw_data_file and template_file:
                         output_buffer.seek(0)
                         total_commission = adviser_data['Adviser Commission'].sum()
                         total_str = f"£{total_commission:,.2f}"
-                        filename = f"TRB_Statement_{adviser.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}_{total_str}.xlsx"
+                        formatted_date = paid_date.strftime("%d-%m-%Y") if paid_date else datetime.now().strftime("%d-%m-%Y")
+                        filename = f"{adviser} {formatted_date} - {total_str}.xlsx"
                         zipf.writestr(filename, output_buffer.getvalue())
                         msg = MIMEMultipart("mixed")
                         recipient = adviser_data["Email"].iloc[0] if "Email" in adviser_data.columns and pd.notnull(adviser_data["Email"].iloc[0]) else ""
@@ -220,11 +224,12 @@ if raw_data_file and template_file:
                                 status_text = st.empty()
                                 for i, introducer in enumerate(introducers):
                                     introducer_data = raw_df[raw_df["Introducer"] == introducer].copy()
-                                    introducer_data = introducer_data.sort_values(by="Date Received")
+                                    introducer_data = introducer_data.sort_values(by="Commission",ascending = False)
                                     template_file.seek(0)
                                     wb = load_workbook(template_file)
                                     ws = wb.active
                                     ws["A4"] = introducer
+                                    paid_date = introducer_data.iloc[0]["Date Paid to Introducer"] if "Date Paid to Introducer" in introducer_data.columns and pd.notnull(introducer_data.iloc[0]["Date Paid to Introducer"]) else None
                                     ws["H5"] = introducer_data.iloc[0]["Date Paid to Introducer"].strftime("%d/%m/%Y") if "Date Paid to Introducer" in introducer_data.columns and pd.notnull(introducer_data.iloc[0]["Date Paid to Introducer"]) else ""
                                     start_row = 7
                                     for idx, row in introducer_data.iterrows():
@@ -244,7 +249,8 @@ if raw_data_file and template_file:
                                     output_buffer.seek(0)
                                     total_commission = introducer_data['Introducer Commission'].sum()
                                     total_str = f"£{total_commission:,.2f}"
-                                    filename = f"TRB_Introducer_Statement_{introducer.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}_{total_str}.xlsx"
+                                    formatted_date = paid_date.strftime("%d-%m-%Y") if paid_date else datetime.now().strftime("%d-%m-%Y")
+                                    filename = f"{introducer} {formatted_date} - {total_str}.xlsx"
                                     zipf.writestr(filename, output_buffer.getvalue())
                                     msg = MIMEMultipart("mixed")
                                     recipient = introducer_data["Introducer Email"].iloc[0] if "Introducer Email" in introducer_data.columns and pd.notnull(introducer_data["Introducer Email"].iloc[0]) else ""
