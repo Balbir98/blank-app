@@ -52,7 +52,7 @@ if raw_data_file and template_file:
                     status_text = st.empty()
 
                     for i, firm in enumerate(unique_firms):
-                        firm_data = raw_df[raw_df["AR Firm Name"] == firm].sort_values(by=["Adviser Name", "Commission Payable"], ascending=[True, False])
+                        firm_data = raw_df[raw_df["AR Firm Name"] == firm].sort_values(by= "Commission Payable", ascending = False)
                         template_file.seek(0)
                         wb = load_workbook(template_file)
                         ws = wb.active
