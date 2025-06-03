@@ -138,7 +138,7 @@ if raw_data_file and template_file:
                     status_text = st.empty()
                     for i, adviser in enumerate(advisers):
                         adviser_data = raw_df[raw_df["Adviser"] == adviser].copy()
-                        adviser_data = adviser_data.sort_values(by="Commission",ascending = False)
+                        adviser_data = adviser_data.sort_values(by="Adviser Commission",ascending = False)
                         template_file.seek(0)
                         wb = load_workbook(template_file)
                         ws = wb.active
@@ -224,7 +224,7 @@ if raw_data_file and template_file:
                                 status_text = st.empty()
                                 for i, introducer in enumerate(introducers):
                                     introducer_data = raw_df[raw_df["Introducer"] == introducer].copy()
-                                    introducer_data = introducer_data.sort_values(by="Commission",ascending = False)
+                                    introducer_data = introducer_data.sort_values(by="Introducer Commission",ascending = False)
                                     template_file.seek(0)
                                     wb = load_workbook(template_file)
                                     ws = wb.active
