@@ -25,6 +25,10 @@ statement_type = st.selectbox("Select Statement Type", ["TRM", "TRB", "TRB - Int
 raw_data_file = st.file_uploader("Upload Commission Data (Excel)", type=["xlsx"], key="raw")
 template_file = st.file_uploader("Upload Commission Statement Template (Excel)", type=["xlsx"], key="template")
 
+custom_email_body = ""
+if statement_type == "TRM":
+    custom_email_body = st.text_area("Optional: Custom Email Body (leave blank to use default)", height=200)
+
 if raw_data_file and template_file:
     if st.button("Run - Generate Statements"):
         start_time = time.time()
@@ -52,7 +56,7 @@ if raw_data_file and template_file:
                     status_text = st.empty()
 
                     for i, firm in enumerate(unique_firms):
-                        firm_data = raw_df[raw_df["AR Firm Name"] == firm].sort_values(by= "Commission Payable", ascending = False)
+                        firm_data = raw_df[raw_df["AR Firm Name"] == firm].sort_values(by=["Adviser Name", "Commission Payable"], ascending=[True, False])
                         template_file.seek(0)
                         wb = load_workbook(template_file)
                         ws = wb.active
@@ -84,16 +88,36 @@ if raw_data_file and template_file:
                         recipient = firm_data["Principal/Adviser Email Address"].iloc[0]
                         recipient = recipient if pd.notnull(recipient) else ""
                         subject = f"Commission Statement - {firm}"
-                        html_body = f"""
-                            <html>
-                                <body>
-                                    <p>Dear Firm Manager,</p>
-                                    <p>Please find attached the latest commission statement for: <strong>{firm}</strong>.</p>
-                                    <p>If you have any questions, feel free to get in touch.</p>
-                                    <p>Best regards!</p>
-                                </body>
-                            </html>
-                        """
+
+                        if custom_email_body.strip():
+                            formatted_body = custom_email_body.replace('\n', '<br>')
+                            html_body = f"""
+                                <html>
+                                    <body>
+                                        <p>{formatted_body}</p>
+                                    </body>
+                                </html>
+                            """
+
+                        else:
+                            html_body = f"""
+                                <html>
+                                    <body>
+                                        <p>Good morning,</p>
+                                        <p>I hope this email finds you well.</p>
+                                        <p>Please find your commission statement for this week attached, payment will be in your account on Friday.</p>
+                                        <p><strong>ACRE tips and hints:</strong> <a href='https://rightmortgageadviser.com/commissions-hub/commissions-overview/#getpaidright'>How to get paid right first time!</a></p>
+                                        <p>Please ensure:<br>
+                                        Mortgages are at <strong>exchanged/complete</strong><br>
+                                        Insurances are at <strong>complete</strong><br>
+                                        & that <strong>ALL</strong> payments you are expecting, are showing in the accounting tab, one off payments section on the case, in order to show in the payments due section.</p>
+                                        <p><a href='https://acresupport.zendesk.com/hc/en-gb/articles/4434905763095-Case-accounting-Adding-one-off-payments-manually-to-a-case'><em>How to add a payment line on acre</em></a></p>
+                                        <p>Please visit <a href='https://acresupport.zendesk.com/hc/en-gb/articles/4485360805911-Accounting-view-Introduction'>ACRE ACCOUNTING</a> for information about how you can see what cases have been received and paid, dealing with client fees etc.</p>
+                                        <p>For any case queries, please quote the client name, provider/lender and policy number/mortgage account number & we will endeavour to respond to you swiftly.</p>
+                                    </body>
+                                </html>
+                            """
+
                         msg = MIMEMultipart("mixed")
                         msg["To"] = recipient
                         msg["Subject"] = subject
