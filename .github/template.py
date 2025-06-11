@@ -122,6 +122,7 @@ if raw_data_file and template_file:
                         msg["To"] = recipient
                         msg["Subject"] = subject
                         msg.add_header("X-Unsent", "1")
+                        msg["From"] = "commissions@therightmortgage.co.uk"
                         alt_part = MIMEMultipart("alternative")
                         alt_part.attach(MIMEText(html_body, "html"))
                         msg.attach(alt_part)
