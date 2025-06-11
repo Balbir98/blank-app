@@ -114,9 +114,28 @@ if raw_data_file and template_file:
                                         <p><a href='https://acresupport.zendesk.com/hc/en-gb/articles/4434905763095-Case-accounting-Adding-one-off-payments-manually-to-a-case'><em>How to add a payment line on acre</em></a></p>
                                         <p>Please visit <a href='https://acresupport.zendesk.com/hc/en-gb/articles/4485360805911-Accounting-view-Introduction'>ACRE ACCOUNTING</a> for information about how you can see what cases have been received and paid, dealing with client fees etc.</p>
                                         <p>For any case queries, please quote the client name, provider/lender and policy number/mortgage account number & we will endeavour to respond to you swiftly.</p>
+
+                                        <br><br>
+                                        <p>Kind regards,</p>
+                                        <p>
+                                            <span style="color: #e36c0a; font-weight: bold;">Commissions Department</span><br>
+                                            The Right Mortgage & Protection Network<br>
+                                            <span style="color: #e36c0a; font-weight: bold;">TRUST. RESPECT. PARTNERSHIP. OPPORTUNITY</span><br>
+                                            <span style="color: #e36c0a; font-weight: bold;">Phone:</span> 01564 732 741<br>
+                                            <span style="color: #e36c0a; font-weight: bold;">Web:</span> <a href='https://therightmortgage.co.uk/' target='_blank'>https://therightmortgage.co.uk/</a><br>
+                                            70 St Johns Close, Knowle, B93 0NH
+                                        </p>
+                                        <p style="font-size: 10px; color: black;">
+                                            This email and the information it contains may be privileged and/or confidential. It is for the intended addressee(s) only. The unauthorised use, disclosure or copying of this email, or any information it contains is prohibited and could in certain circumstances be a criminal offence. If you are not the intended recipient, please notify <a href='mailto:info@therightmortgage.co.uk'>info@therightmortgage.co.uk</a> immediately and delete the message from your system.<br>
+                                            Please note that The Right Mortgage does not enter into any form of contract by means of Internet email. None of the staff of The Right Mortgage is authorised to enter into contracts on behalf of the company in this way. All contracts to which The Right Mortgage is a party are documented by other means.<br>
+                                            The Right Mortgage monitors emails to ensure its systems operate effectively and to minimise the risk of viruses. Whilst it has taken reasonable steps to scan this email, it does not accept liability for any virus that it may contain.<br>
+                                            Head Office: St Johns Court, 70 St Johns Close, Knowle, Solihull, B93 0NH. Registered in England no. 08130498<br>
+                                            The Right Mortgage & Protection Network is a trading style of The Right Mortgage Limited, which is authorised and regulated by the Financial Conduct Authority.
+                                        </p>
                                     </body>
                                 </html>
                             """
+
 
                         msg = MIMEMultipart("mixed")
                         msg["To"] = recipient
