@@ -20,7 +20,7 @@ Upload the **Zoho Analytics Commission Data** and the **Excel template** to begi
 This tool will generate one statement per AR Firm!
 """)
 
-statement_type = st.selectbox("Select Statement Type", ["TRM", "TRB", "TRB - Introducers"])
+statement_type = st.selectbox("Select Statement Type", ["TRM", "TRB", "TRB - Introducers","Unallocated Cases"])
 
 raw_data_file = st.file_uploader("Upload Commission Data (Excel)", type=["xlsx"], key="raw")
 template_file = st.file_uploader("Upload Commission Statement Template (Excel)", type=["xlsx"], key="template")
@@ -332,6 +332,110 @@ if raw_data_file and template_file:
                                     elapsed = time.time() - start_time
                                     progress_bar.progress((i + 1) / total_firms)
                                     status_text.text(f"Processed {i + 1} of {total_firms} introducers in {elapsed:.2f} seconds")
+            elif statement_type == "Unallocated Cases":
+                expected_columns = [
+                    "Acre Name", "Email", "Adviser Name", "Lenders", "Policy Reference",
+                    "Product Type", "Client First Name", "Client Surname", "Class"
+                ]
+
+                if not all(col in raw_df.columns for col in expected_columns):
+                    st.error("The raw Unallocated data is missing one or more required columns.")
+                else:
+                    firms = raw_df["Acre Name"].dropna().unique()
+                    total_firms = len(firms)
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+
+                    for i, firm in enumerate(firms):
+                        firm_data = raw_df[raw_df["Acre Name"] == firm].copy()
+                        firm_data = firm_data.sort_values(by="Adviser Name")
+
+                        template_file.seek(0)
+                        wb = load_workbook(template_file)
+                        ws = wb.active
+
+                        ws["A4"] = firm
+                        ws["F4"] = datetime.now().strftime("%d/%m/%Y")
+
+                        start_row = 7
+                        for idx, row in firm_data.iterrows():
+                            data_font = Font(name="Calibri", size=9, bold=False)
+                            ws.cell(row=start_row, column=1, value=row["Adviser Name"]).font = data_font
+                            ws.cell(row=start_row, column=2, value=row["Lenders"]).font = data_font
+                            ws.cell(row=start_row, column=3, value=row["Policy Reference"]).font = data_font
+                            ws.cell(row=start_row, column=4, value=row["Product Type"]).font = data_font
+                            ws.cell(row=start_row, column=5, value=row["Client First Name"]).font = data_font
+                            ws.cell(row=start_row, column=6, value=row["Client Surname"]).font = data_font
+                            ws.cell(row=start_row, column=7, value=row["Class"]).font = data_font
+                            start_row += 1
+
+                        output_buffer = io.BytesIO()
+                        wb.save(output_buffer)
+                        output_buffer.seek(0)
+
+                        formatted_date = datetime.now().strftime("%d-%m-%Y")
+                        filename = f"Unallocated - {firm} - {formatted_date}.xlsx"
+
+                        recipient = firm_data["Email"].iloc[0] if pd.notnull(firm_data["Email"].iloc[0]) else ""
+                        subject = f"Unallocated Report - {firm}"
+
+                        html_body = f"""
+                            <html>
+                                <body>
+                                    <p><strong>Classification - <span style='color: red;'>Confidential</span></strong></p>
+                                    <p>Good morning,</p>
+                                    <p>I hope this email finds you well.</p>
+                                    <p>Please find your unallocated commission breakdown.<br>
+                                    If you can let us know when the cases have been completed on acre.</p>
+                                    <p>Any commission statement due this week will be sent separately</p>
+                                    <p>For any case queries, please quote the client name, provider/lender and policy number/mortgage account number & we will endeavour to respond to you swiftly.</p>
+                                    <br>
+                                    <p style="font-family: Calibri, sans-serif; font-size: 15px;">
+                                        <strong style="color:#e57200">Commissions Department</strong><br>
+                                        The Right Mortgage & Protection Network<br>
+                                        <strong style="color:#e57200">TRUST. RESPECT. PARTNERSHIP. OPPORTUNITY</strong><br>
+                                        <strong style="color:#e57200">Phone:</strong> 01564 732 741<br>
+                                        <strong style="color:#e57200">Web:</strong> <a href="https://therightmortgage.co.uk/">https://therightmortgage.co.uk/</a><br>
+                                        70 St Johns Close, Knowle, B93 0NH
+                                    </p>
+                                    <p style="font-size:12px; color:#000;">
+                                    This email and the information it contains may be privileged and/or confidential. It is for the intended addressee(s) only. The unauthorised use, disclosure or copying of this email, or any information it contains is prohibited and could in certain circumstances be a criminal offence. If you are not the intended recipient, please notify <a href='mailto:info@therightmortgage.co.uk'>info@therightmortgage.co.uk</a> immediately and delete the message from your system.<br>
+                                    Please note that The Right Mortgage does not enter into any form of contract by means of Internet email. None of the staff of The Right Mortgage is authorised to enter into contracts on behalf of the company in this way. All contracts to which The Right Mortgage is a party are documented by other means.<br>
+                                    The Right Mortgage monitors emails to ensure its systems operate effectively and to minimise the risk of viruses. Whilst it has taken reasonable steps to scan this email, it does not accept liability for any virus that it may contain.<br>
+                                    Head Office: St Johns Court, 70 St Johns Close, Knowle, Solihull, B93 0NH. Registered in England no. 08130498<br>
+                                    The Right Mortgage & Protection Network is a trading style of The Right Mortgage Limited, which is authorised and regulated by the Financial Conduct Authority.
+                                    </p>
+                                </body>
+                            </html>
+                        """
+
+                        msg = MIMEMultipart("mixed")
+                        msg["To"] = recipient
+                        msg["Subject"] = subject
+                        msg.add_header("X-Unsent", "1")
+
+                        alt_part = MIMEMultipart("alternative")
+                        alt_part.attach(MIMEText(html_body, "html"))
+                        msg.attach(alt_part)
+
+                        from email.mime.application import MIMEApplication
+                        part = MIMEApplication(output_buffer.getvalue(), _subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet", Name=filename)
+                        encoders.encode_base64(part)
+                        part.add_header("Content-Disposition", f"attachment; filename=\"{filename}\"")
+                        msg.attach(part)
+
+                        eml_filename = f"Unallocated - {firm} - {formatted_date}.eml"
+                        eml_io = io.BytesIO()
+                        from email.generator import BytesGenerator
+                        gen = BytesGenerator(eml_io)
+                        gen.flatten(msg)
+                        eml_io.seek(0)
+                        eml_zip.writestr(eml_filename, eml_io.read())
+
+                        elapsed = time.time() - start_time
+                        progress_bar.progress((i + 1) / total_firms)
+                        status_text.text(f"Processed {i + 1} of {total_firms} firms in {elapsed:.2f} seconds")
+
 
         zip_buffer.seek(0)
         eml_zip_buffer.seek(0)

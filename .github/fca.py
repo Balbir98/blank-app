@@ -1,4 +1,4 @@
-# fca_streamlit_app.py
+# google_contact_scraper_app.py
 
 import streamlit as st
 import pandas as pd
@@ -7,102 +7,148 @@ import os
 from playwright.sync_api import sync_playwright
 import openpyxl
 import time
+import re
 
-# --- SCRAPE FUNCTION ---
-def scrape_fca_page(url, page):
+# --- SCRAPE GOOGLE PAGE ---
+def scrape_google_for_contact(firm_name, page):
+    print(f"Searching Google for: {firm_name}")
+
+    query = f"{firm_name} email phone site:.co.uk OR site:.com"
+    page.goto(f"https://www.google.com/search?q={query}")
+
+    page.wait_for_timeout(3000)
+
     try:
-        page.goto(url, wait_until="domcontentloaded")
+        # Loop through top 10 results
+        for i in range(10):
+            result_link = page.locator("div.MjjYud div > a").nth(i)
+            link_href = result_link.get_attribute("href")
 
-        # Accept cookies popup if shown
-        try:
-            if page.locator("text=Accept all cookies").is_visible():
-                page.locator("text=Accept all cookies").click()
-                page.wait_for_timeout(1000)
-        except:
-            pass
+            if not link_href:
+                continue
 
-        # --- Scrape Address ---
-        try:
-            address_section = page.locator("text=Address").locator("xpath=..").locator("xpath=following-sibling::*[1]")
-            address_text = address_section.inner_text().strip()
-            address_lines = address_text.split("\n")
-        except:
-            address_lines = []
+            print(f"Checking result: {link_href}")
 
-        # --- Scrape Phone ---
-        try:
-            phone_section = page.locator("text=Phone").locator("xpath=..").locator("xpath=following-sibling::*[1]")
-            phone = phone_section.inner_text().strip()
-        except:
-            phone = ""
+            skip_keywords = ["facebook", "yell", "trustpilot", "linkedin", "192.com", "unbiased"]
+            if any(keyword in link_href for keyword in skip_keywords):
+                print(f"Skipping directory result: {link_href}")
+                continue
 
-        # --- Scrape Email ---
-        try:
-            email_section = page.locator("text=Email").locator("xpath=..").locator("xpath=following-sibling::*[1]")
-            email = email_section.inner_text().strip()
-        except:
-            email = ""
+            # Go to result
+            page.goto(link_href)
+            page.wait_for_timeout(3000)
 
-        return address_lines, phone, email
+            # Try clicking Contact link if present
+            try:
+                contact_link = page.locator("a:has-text('Contact')").first
+                if contact_link.count() > 0:
+                    contact_link.click()
+                    page.wait_for_timeout(3000)
+            except Exception as e:
+                print(f"Contact link not found or click error: {e}")
+
+            # Extract visible mailto links
+            email_elements = page.locator("a[href^='mailto:']")
+            emails = email_elements.all_inner_texts()
+            email = emails[0] if emails else ""
+            print(f"Email found (Google): {email}")
+
+            # Extract visible tel links
+            phone_elements = page.locator("a[href^='tel:']")
+            phones = phone_elements.all_inner_texts()
+            phone = phones[0] if phones else ""
+            print(f"Phone found (Google): {phone}")
+
+            # If we found either email or phone, return it
+            if email or phone:
+                return phone, email
+
+            # If no Contact link or no data found, try About page
+            try:
+                about_link = page.locator("a:has-text('About')").first
+                if about_link.count() > 0:
+                    about_link.click()
+                    page.wait_for_timeout(3000)
+
+                    # Retry extracting mailto and tel on About page
+                    email_elements = page.locator("a[href^='mailto:']")
+                    emails = email_elements.all_inner_texts()
+                    email = emails[0] if emails else email
+
+                    phone_elements = page.locator("a[href^='tel:']")
+                    phones = phone_elements.all_inner_texts()
+                    phone = phones[0] if phones else phone
+
+                    print(f"Email found (About page): {email}")
+                    print(f"Phone found (About page): {phone}")
+
+                    if email or phone:
+                        return phone, email
+
+            except Exception as e:
+                print(f"About link not found or click error: {e}")
+
+            # Also check footer
+            try:
+                footer = page.locator("footer").first
+                footer_html = footer.inner_html()
+
+                email_matches = re.findall(r'mailto:([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)', footer_html)
+                email = email_matches[0] if email_matches else email
+
+                phone_matches = re.findall(r'(?:\+?\d{1,3}[\s.-]?)?(?:\(?\d{2,4}\)?[\s.-]?)?\d{3,4}[\s.-]?\d{3,4}', footer_html)
+                phone_matches = [p for p in phone_matches if len(p.strip()) >= 9]
+                phone = phone_matches[0] if phone_matches else phone
+
+                print(f"Email found (Footer): {email}")
+                print(f"Phone found (Footer): {phone}")
+
+                if email or phone:
+                    return phone, email
+
+            except Exception as e:
+                print(f"Footer not found or scrape error: {e}")
+
+        print("No suitable site found in top 10 Google results.")
+        return "", ""
 
     except Exception as e:
-        print(f"Error scraping {url}: {e}")
-        return [], "", ""
+        print(f"Google fallback scrape error: {e}")
+        return "", ""
 
 # --- MAIN APP ---
 def main():
-    st.title("FCA Register Data Enrichment Tool")
+    st.title("Firm Email & Phone Scraper (Google Search)")
 
-    uploaded_file = st.file_uploader("Upload FCA Register Excel file", type=["xlsx"])
+    uploaded_file = st.file_uploader("Upload Firm List Excel file", type=["xlsx"])
 
     if uploaded_file is not None:
         df = pd.read_excel(uploaded_file, engine="openpyxl")
 
-        # Extract hyperlinks from column A
-        wb = openpyxl.load_workbook(uploaded_file)
-        sheet = wb.active
-        urls = []
-        for cell in sheet["A"][1:]:  # skip header row
-            if cell.hyperlink:
-                urls.append(cell.hyperlink.target)
-            else:
-                urls.append("")
-
-        df["FCA URL"] = urls
+        df["Email"] = ""
+        df["Phone"] = ""
 
         if st.button("Generate"):
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True)
-                page = browser.new_page()  # Reuse single page → faster
+                page = browser.new_page()
 
-                # Prepare columns BEFORE the loop
-                df["Address Line 1"] = ""
-                df["Address Line 2"] = ""
-                df["Address Line 3"] = ""
-                df["Address Line 4"] = ""
-                df["Postcode"] = ""
-                df["Email"] = ""
-                df["Phone"] = ""
-
-                # Progress bar + Timer
                 progress_bar = st.progress(0)
                 status_text = st.empty()
+                progress_text = st.empty()
+
                 start_time = time.time()
 
-                for idx, url in enumerate(df["FCA URL"]):
-                    if url:
-                        address_lines, phone, email = scrape_fca_page(url, page)
+                for idx, firm_name in enumerate(df.iloc[:, 0]):
+                    print(f"\n--- Firm {idx+1}: {firm_name} ---")
 
-                        # Fill address columns
-                        for i in range(5):
-                            column_name = f"Address Line {i+1}" if i < 4 else "Postcode"
-                            value = address_lines[i] if i < len(address_lines) else ""
-                            df.iloc[idx, df.columns.get_loc(column_name)] = value
+                    phone, email = scrape_google_for_contact(firm_name, page)
 
-                        df.at[idx, "Email"] = email
-                        df.at[idx, "Phone"] = phone
+                    df.at[idx, "Email"] = email
+                    df.at[idx, "Phone"] = phone
 
-                    # Progress + Timer
+                    time.sleep(2)
+
                     progress = (idx + 1) / len(df)
                     progress_bar.progress(progress)
 
@@ -111,7 +157,6 @@ def main():
                     remaining_firms = len(df) - (idx + 1)
                     eta_seconds = remaining_firms * avg_time_per_firm
 
-                    # Format time nicely
                     def format_seconds(seconds):
                         mins, secs = divmod(int(seconds), 60)
                         return f"{mins:02}:{secs:02}"
@@ -122,16 +167,17 @@ def main():
                         f"ETA: {format_seconds(eta_seconds)}"
                     )
 
+                    progress_text.text(f"Elapsed time: {format_seconds(elapsed)} seconds")
+
                 browser.close()
 
-                # Save to temp file
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
                     df.to_excel(tmp.name, index=False)
                     tmp_path = tmp.name
 
                 st.success("Done! Download your enriched file below.")
                 with open(tmp_path, "rb") as f:
-                    st.download_button("Download Enriched Excel", f, file_name="enriched_fca_register.xlsx")
+                    st.download_button("Download Enriched Excel", f, file_name="enriched_firm_contacts.xlsx")
 
                 os.unlink(tmp_path)
 
