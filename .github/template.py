@@ -334,20 +334,20 @@ if raw_data_file and template_file:
                                     status_text.text(f"Processed {i + 1} of {total_firms} introducers in {elapsed:.2f} seconds")
             elif statement_type == "Unallocated Cases":
                 expected_columns = [
-                    "Acre Name", "Email", "Adviser Name", "Lenders", "Policy Reference",
+                    "AR Firm Name", "Email", "Adviser Name", "Lenders", "Policy Reference",
                     "Product Type", "Client First Name", "Client Surname", "Class"
                 ]
 
                 if not all(col in raw_df.columns for col in expected_columns):
                     st.error("The raw Unallocated data is missing one or more required columns.")
                 else:
-                    firms = raw_df["Acre Name"].dropna().unique()
+                    firms = raw_df["AR Firm Name"].dropna().unique()
                     total_firms = len(firms)
                     progress_bar = st.progress(0)
                     status_text = st.empty()
 
                     for i, firm in enumerate(firms):
-                        firm_data = raw_df[raw_df["Acre Name"] == firm].copy()
+                        firm_data = raw_df[raw_df["AR Firm Name"] == firm].copy()
                         firm_data = firm_data.sort_values(by="Adviser Name")
 
                         template_file.seek(0)
@@ -375,6 +375,9 @@ if raw_data_file and template_file:
 
                         formatted_date = datetime.now().strftime("%d-%m-%Y")
                         filename = f"Unallocated - {firm} - {formatted_date}.xlsx"
+
+                        # Write Excel to ZIP archive directly (flat)
+                        zipf.writestr(filename, output_buffer.getvalue())
 
                         recipient = firm_data["Email"].iloc[0] if pd.notnull(firm_data["Email"].iloc[0]) else ""
                         subject = f"Unallocated Report - {firm}"
@@ -424,7 +427,7 @@ if raw_data_file and template_file:
                         part.add_header("Content-Disposition", f"attachment; filename=\"{filename}\"")
                         msg.attach(part)
 
-                        eml_filename = f"Unallocated - {firm} - {formatted_date}.eml"
+                        eml_filename = f"Unallocated - {firm.replace('/', '-') } - {formatted_date}.eml"
                         eml_io = io.BytesIO()
                         from email.generator import BytesGenerator
                         gen = BytesGenerator(eml_io)
