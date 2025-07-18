@@ -30,10 +30,13 @@ class EmailPDF(FPDF):
         self.ln(10)
 
         for attachment in msg.attachments:
-            attachment_path = os.path.join(attachments_dir, attachment.longFilename or attachment.shortFilename)
-            with open(attachment_path, 'wb') as f:
-                f.write(attachment.data)
-            self.multi_cell(0, 10, f"[Attachment saved: {attachment.longFilename or attachment.shortFilename}]")
+            try:
+                attachment_path = os.path.join(attachments_dir, attachment.longFilename or attachment.shortFilename)
+                with open(attachment_path, 'wb') as f:
+                    f.write(attachment.data)
+                self.multi_cell(0, 10, f"[Attachment saved: {attachment.longFilename or attachment.shortFilename}]")
+            except Exception as e:
+                self.multi_cell(0, 10, f"[Failed to save attachment: {e}]")
 
 # Convert .msg files in a zip to PDFs (including subfolders)
 def convert_zipped_msg_files(zip_file, output_dir, progress_callback):
@@ -53,10 +56,17 @@ def convert_zipped_msg_files(zip_file, output_dir, progress_callback):
     if total == 0:
         return False
 
+    converted_count = 0
+
     for i, file_path in enumerate(msg_files):
         try:
             msg = extract_msg.Message(str(file_path))
             msg.extract_attachments()
+
+            # Skip if completely blank or broken
+            if not msg.sender and not msg.subject and not msg.body:
+                st.warning(f"Skipped possibly invalid file: {file_path.name}")
+                continue
 
             attachments_dir = os.path.join(output_dir, f"attachments_{i}")
             os.makedirs(attachments_dir, exist_ok=True)
@@ -67,11 +77,12 @@ def convert_zipped_msg_files(zip_file, output_dir, progress_callback):
             pdf_path = os.path.join(output_dir, f"email_{i+1}.pdf")
             pdf.output(pdf_path)
 
-            progress_callback((i + 1) / total)
+            converted_count += 1
+            progress_callback((converted_count) / total)
         except Exception as e:
-            print(f"Error processing file {file_path}: {e}")
+            st.warning(f"Error processing file {file_path.name}: {e}")
 
-    return True
+    return converted_count > 0
 
 # Main App
 st.title("📧 Outlook Email (.msg) ZIP to PDF Converter")
