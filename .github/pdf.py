@@ -62,8 +62,9 @@ def convert_zipped_msg_files(zip_file, output_dir, progress_callback):
             
 
             # Skip if completely blank or broken
+            # Skip if completely blank or broken
             if not msg.sender and not msg.subject and not msg.body:
-                st.warning(f"Skipped possibly invalid file: {file_path.name}")
+                st.warning(f"⚠️ Skipped blank or invalid file: {file_path.name}")
                 continue
 
             attachments_dir = os.path.join(output_dir, f"attachments_{i}")
@@ -72,15 +73,16 @@ def convert_zipped_msg_files(zip_file, output_dir, progress_callback):
             pdf = EmailPDF()
             pdf.msg_to_pdf(msg, attachments_dir)
 
-            safe_subject = msg.subject if msg.subject else f"email_{i+1}"
-            safe_subject = "_".join(safe_subject.split())[:100].replace("/", "_").replace("\\", "_")
+            subject_raw = msg.subject if msg.subject else f"email_{i+1}"
+            safe_subject = "_".join(subject_raw.strip().split())[:100].replace("/", "_").replace("\\", "_")
             pdf_path = os.path.join(output_dir, f"{safe_subject}.pdf")
             pdf.output(pdf_path)
 
             converted_count += 1
             progress_callback((converted_count) / total)
         except Exception as e:
-            st.warning(f"Error processing file {file_path.name}: {e}")
+            st.warning(f"❌ Error processing file {file_path.name}: {e}")
+            continue
 
     st.info(f"✅ {converted_count} of {total} emails were converted to PDF.")
     return converted_count > 0
