@@ -82,6 +82,7 @@ def convert_zipped_msg_files(zip_file, output_dir, progress_callback):
         except Exception as e:
             st.warning(f"Error processing file {file_path.name}: {e}")
 
+    st.info(f"✅ {converted_count} of {total} emails were converted to PDF.")
     return converted_count > 0
 
 # Main App
