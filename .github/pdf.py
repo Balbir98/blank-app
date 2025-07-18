@@ -5,6 +5,7 @@ import extract_msg
 from fpdf import FPDF
 from pathlib import Path
 import zipfile
+import shutil
 
 # Helper: Create PDF from .msg email
 class EmailPDF(FPDF):
@@ -34,22 +35,25 @@ class EmailPDF(FPDF):
                 f.write(attachment.data)
             self.multi_cell(0, 10, f"[Attachment saved: {attachment.longFilename or attachment.shortFilename}]")
 
-# Convert .msg files in a zip to PDFs
+# Convert .msg files in a zip to PDFs (including subfolders)
 def convert_zipped_msg_files(zip_file, output_dir, progress_callback):
     temp_zip_dir = tempfile.mkdtemp()
-    with open(os.path.join(temp_zip_dir, "emails.zip"), "wb") as f:
+    zip_path = os.path.join(temp_zip_dir, "emails.zip")
+
+    with open(zip_path, "wb") as f:
         f.write(zip_file.read())
 
-    with zipfile.ZipFile(os.path.join(temp_zip_dir, "emails.zip"), 'r') as zip_ref:
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(temp_zip_dir)
 
-    files = list(Path(temp_zip_dir).glob("**/*.msg"))
-    total = len(files)
+    # Find all .msg files recursively
+    msg_files = list(Path(temp_zip_dir).rglob("*.msg"))
+    total = len(msg_files)
 
     if total == 0:
         return False
 
-    for i, file_path in enumerate(files):
+    for i, file_path in enumerate(msg_files):
         try:
             msg = extract_msg.Message(str(file_path))
             msg.extract_attachments()
