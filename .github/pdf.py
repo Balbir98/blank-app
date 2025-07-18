@@ -33,14 +33,7 @@ class EmailPDF(FPDF):
             self.multi_cell(0, 10, f"[Error rendering body: {e}]")
         self.ln(10)
 
-        for attachment in msg.attachments:
-            try:
-                attachment_path = os.path.join(attachments_dir, attachment.longFilename or attachment.shortFilename)
-                with open(attachment_path, 'wb') as f:
-                    f.write(attachment.data)
-                self.multi_cell(0, 10, f"[Attachment saved: {attachment.longFilename or attachment.shortFilename}]")
-            except Exception as e:
-                self.multi_cell(0, 10, f"[Failed to save attachment: {e}]")
+        # Attachments skipped per user request
 
 
 # Convert .msg files in a zip to PDFs (including subfolders)
@@ -79,7 +72,9 @@ def convert_zipped_msg_files(zip_file, output_dir, progress_callback):
             pdf = EmailPDF()
             pdf.msg_to_pdf(msg, attachments_dir)
 
-            pdf_path = os.path.join(output_dir, f"email_{i+1}.pdf")
+            safe_subject = msg.subject if msg.subject else f"email_{i+1}"
+            safe_subject = "_".join(safe_subject.split())[:100].replace("/", "_").replace("\\", "_")
+            pdf_path = os.path.join(output_dir, f"{safe_subject}.pdf")
             pdf.output(pdf_path)
 
             converted_count += 1
