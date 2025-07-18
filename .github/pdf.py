@@ -27,12 +27,8 @@ class EmailPDF(FPDF):
 
         body = msg.body if msg.body else "(No message body)"
         try:
-            try:
-            self.multi_cell(0, 10, "Body:
-
-" + body.encode("latin-1", "replace").decode("latin-1"))
-        except Exception as e:
-            self.multi_cell(0, 10, f"[Error rendering body: {e}]").decode("latin-1"))
+            rendered_body = "Body:" + body.encode("latin-1", "replace").decode("latin-1")
+            self.multi_cell(0, 10, rendered_body)
         except Exception as e:
             self.multi_cell(0, 10, f"[Error rendering body: {e}]")
         self.ln(10)
@@ -45,6 +41,7 @@ class EmailPDF(FPDF):
                 self.multi_cell(0, 10, f"[Attachment saved: {attachment.longFilename or attachment.shortFilename}]")
             except Exception as e:
                 self.multi_cell(0, 10, f"[Failed to save attachment: {e}]")
+
 
 # Convert .msg files in a zip to PDFs (including subfolders)
 def convert_zipped_msg_files(zip_file, output_dir, progress_callback):
