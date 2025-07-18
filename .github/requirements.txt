@@ -6,3 +6,5 @@ openpyxl
 playwright
 bs4
 asyncio
+fpdf
+
