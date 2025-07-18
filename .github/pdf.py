@@ -34,19 +34,24 @@ class EmailPDF(FPDF):
                 f.write(attachment.data)
             self.multi_cell(0, 10, f"[Attachment saved: {attachment.longFilename or attachment.shortFilename}]")
 
-# Convert individual .msg files to PDFs
-def convert_uploaded_msg_files(files, output_dir, progress_callback):
+# Convert .msg files in a zip to PDFs
+def convert_zipped_msg_files(zip_file, output_dir, progress_callback):
+    temp_zip_dir = tempfile.mkdtemp()
+    with open(os.path.join(temp_zip_dir, "emails.zip"), "wb") as f:
+        f.write(zip_file.read())
+
+    with zipfile.ZipFile(os.path.join(temp_zip_dir, "emails.zip"), 'r') as zip_ref:
+        zip_ref.extractall(temp_zip_dir)
+
+    files = list(Path(temp_zip_dir).glob("**/*.msg"))
     total = len(files)
+
     if total == 0:
         return False
 
-    for i, uploaded_file in enumerate(files):
+    for i, file_path in enumerate(files):
         try:
-            temp_msg_path = os.path.join(output_dir, f"email_{i}.msg")
-            with open(temp_msg_path, "wb") as f:
-                f.write(uploaded_file.read())
-
-            msg = extract_msg.Message(temp_msg_path)
+            msg = extract_msg.Message(str(file_path))
             msg.extract_attachments()
 
             attachments_dir = os.path.join(output_dir, f"attachments_{i}")
@@ -60,17 +65,17 @@ def convert_uploaded_msg_files(files, output_dir, progress_callback):
 
             progress_callback((i + 1) / total)
         except Exception as e:
-            print(f"Error processing file {uploaded_file.name}: {e}")
+            print(f"Error processing file {file_path}: {e}")
 
     return True
 
 # Main App
-st.title("📧 Outlook Email (.msg) to PDF Converter")
-st.markdown("Upload one or more `.msg` email files. The app will convert each email into a PDF including attachments.")
+st.title("📧 Outlook Email (.msg) ZIP to PDF Converter")
+st.markdown("Upload a `.zip` file containing `.msg` email files. The app will convert each email into a PDF including attachments.")
 
-uploaded_files = st.file_uploader("Upload .msg email files", type="msg", accept_multiple_files=True)
+uploaded_zip = st.file_uploader("Upload ZIP file with .msg emails", type="zip")
 
-if uploaded_files:
+if uploaded_zip:
     if st.button("Convert Emails to PDFs"):
         with st.spinner("Processing emails..."):
             temp_dir = tempfile.mkdtemp()
@@ -78,7 +83,7 @@ if uploaded_files:
             os.makedirs(output_dir, exist_ok=True)
 
             progress_bar = st.progress(0)
-            success = convert_uploaded_msg_files(uploaded_files, output_dir, lambda p: progress_bar.progress(p))
+            success = convert_zipped_msg_files(uploaded_zip, output_dir, lambda p: progress_bar.progress(p))
 
             if not success:
                 st.error("No .msg files found or failed to convert emails.")
