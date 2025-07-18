@@ -26,7 +26,12 @@ class EmailPDF(FPDF):
         self.ln(10)
 
         body = msg.body if msg.body else "(No message body)"
-        self.multi_cell(0, 10, "Body:\n\n" + body)
+        try:
+            self.multi_cell(0, 10, "Body:
+
+" + body.encode("latin-1", "replace").decode("latin-1"))
+        except Exception as e:
+            self.multi_cell(0, 10, f"[Error rendering body: {e}]")
         self.ln(10)
 
         for attachment in msg.attachments:
