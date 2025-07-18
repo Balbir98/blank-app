@@ -27,9 +27,12 @@ class EmailPDF(FPDF):
 
         body = msg.body if msg.body else "(No message body)"
         try:
+            try:
             self.multi_cell(0, 10, "Body:
 
 " + body.encode("latin-1", "replace").decode("latin-1"))
+        except Exception as e:
+            self.multi_cell(0, 10, f"[Error rendering body: {e}]").decode("latin-1"))
         except Exception as e:
             self.multi_cell(0, 10, f"[Error rendering body: {e}]")
         self.ln(10)
