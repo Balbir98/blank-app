@@ -61,7 +61,7 @@ def convert_zipped_msg_files(zip_file, output_dir, progress_callback):
     for i, file_path in enumerate(msg_files):
         try:
             msg = extract_msg.Message(str(file_path))
-            msg.extract_attachments()
+            
 
             # Skip if completely blank or broken
             if not msg.sender and not msg.subject and not msg.body:
