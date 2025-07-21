@@ -5,18 +5,15 @@ import extract_msg
 from fpdf import FPDF
 from pathlib import Path
 import zipfile
-import shutil
 
 # Helper: Create PDF from .msg email (no attachments)
 class EmailPDF(FPDF):
     def header(self):
-        # Called automatically on every new page
         self.set_font("Arial", "B", 12)
         self.cell(0, 10, "Email Export", ln=True, align='C')
         self.ln(10)
 
     def msg_to_pdf(self, msg):
-        # one page for headers + body
         self.set_auto_page_break(auto=True, margin=15)
         self.add_page()
         self.set_font("Arial", size=12)
@@ -36,8 +33,8 @@ class EmailPDF(FPDF):
         except Exception as e:
             self.multi_cell(0, 10, f"[Error rendering body: {e}]")
 
+# Convert .msg files in a zip to PDFs (including subfolders)
 def convert_zipped_msg_files(zip_file, output_dir, progress_callback):
-    # unpack zip
     work = tempfile.mkdtemp()
     zpath = os.path.join(work, "in.zip")
     with open(zpath, "wb") as f:
@@ -45,31 +42,30 @@ def convert_zipped_msg_files(zip_file, output_dir, progress_callback):
     with zipfile.ZipFile(zpath, 'r') as zp:
         zp.extractall(work)
 
-    # find all .msg
     paths = list(Path(work).rglob("*.msg"))
     total = len(paths)
     if total == 0:
         return False
 
     for idx, p in enumerate(paths, start=1):
-        # try load, else stub
         try:
             msg = extract_msg.Message(str(p))
         except Exception:
+            # stub for unparsable
             class Stub: pass
             msg = Stub()
             msg.sender = msg.to = msg.subject = msg.date = msg.body = ""
 
-        # build PDF
+        # Build and save PDF
         pdf = EmailPDF()
         pdf.msg_to_pdf(msg)
 
-        # safe filename
+        # Unique, index-prefixed filename
         subj = getattr(msg, 'subject', '') or f"email_{idx}"
         safe = "_".join(subj.split())[:100].replace("/", "_").replace("\\", "_")
-        out_path = os.path.join(output_dir, f"{safe}.pdf")
+        filename = f"{idx:04d}_{safe}.pdf"
+        out_path = os.path.join(output_dir, filename)
 
-        # always write
         try:
             pdf.output(out_path)
         except Exception as e:
@@ -81,8 +77,8 @@ def convert_zipped_msg_files(zip_file, output_dir, progress_callback):
     return True
 
 # Streamlit UI
-st.title("📧 Outlook .msg → PDF (no attachments)")
-st.markdown("Upload a `.zip` of `.msg` files; each one becomes a PDF.")
+st.title("📧 Outlook .msg → PDF (unique filenames)")
+st.markdown("Upload a `.zip` of `.msg` files; each one becomes a PDF named `####_subject.pdf`.")
 
 up = st.file_uploader("ZIP with .msg emails", type="zip")
 if up and st.button("Convert"):
@@ -95,6 +91,7 @@ if up and st.button("Convert"):
         if not ok:
             st.error("No .msg files found.")
         else:
+            # Zip and provide download
             zip_out = os.path.join(td, "out.zip")
             with zipfile.ZipFile(zip_out, 'w') as zf:
                 for r, _, files in os.walk(od):
@@ -103,4 +100,4 @@ if up and st.button("Convert"):
                         zf.write(full, os.path.relpath(full, od))
             with open(zip_out, "rb") as f:
                 st.download_button("📥 Download PDFs", data=f, file_name="converted_pdfs.zip", mime="application/zip")
-            st.success("Done—one PDF per .msg!")
+            st.success("Done—one unique PDF per .msg!")
