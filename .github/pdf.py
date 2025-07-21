@@ -5,6 +5,7 @@ import extract_msg
 from fpdf import FPDF
 from pathlib import Path
 import zipfile
+import re
 
 # Helper: Create PDF from .msg email (no attachments)
 class EmailPDF(FPDF):
@@ -14,6 +15,7 @@ class EmailPDF(FPDF):
         self.ln(10)
 
     def msg_to_pdf(self, msg):
+        # Setup page and font
         self.set_auto_page_break(auto=True, margin=15)
         self.add_page()
         self.set_font("Arial", size=12)
@@ -35,69 +37,85 @@ class EmailPDF(FPDF):
 
 # Convert .msg files in a zip to PDFs (including subfolders)
 def convert_zipped_msg_files(zip_file, output_dir, progress_callback):
+    # Unzip incoming buffer
     work = tempfile.mkdtemp()
-    zpath = os.path.join(work, "in.zip")
-    with open(zpath, "wb") as f:
+    zip_in = os.path.join(work, "in.zip")
+    with open(zip_in, "wb") as f:
         f.write(zip_file.read())
-    with zipfile.ZipFile(zpath, 'r') as zp:
+    with zipfile.ZipFile(zip_in, 'r') as zp:
         zp.extractall(work)
 
-    paths = list(Path(work).rglob("*.msg"))
-    total = len(paths)
+    # Gather all .msg paths
+    msg_paths = list(Path(work).rglob("*.msg"))
+    total = len(msg_paths)
     if total == 0:
         return False
 
-    for idx, p in enumerate(paths, start=1):
+    for idx, path in enumerate(msg_paths, start=1):
+        # Attempt to parse message
         try:
-            msg = extract_msg.Message(str(p))
+            msg = extract_msg.Message(str(path))
         except Exception:
-            # stub for unparsable
+            # Create a stub message if parsing fails
             class Stub: pass
             msg = Stub()
             msg.sender = msg.to = msg.subject = msg.date = msg.body = ""
 
-        # Build and save PDF
+        # Build PDF
         pdf = EmailPDF()
         pdf.msg_to_pdf(msg)
 
-        # Unique, index-prefixed filename
-        subj = getattr(msg, 'subject', '') or f"email_{idx}"
-        safe = "_".join(subj.split())[:100].replace("/", "_").replace("\\", "_")
-        filename = f"{idx:04d}_{safe}.pdf"
+        # Sanitize subject for filename
+        raw_subj = getattr(msg, 'subject', '') or f"email_{idx}"
+        # Replace non-alphanumeric chars with underscore
+        safe_subj = re.sub(r'[^A-Za-z0-9_-]', '_', raw_subj)[:100]
+        filename = f"{idx:04d}_{safe_subj}.pdf"
         out_path = os.path.join(output_dir, filename)
 
+        # Write PDF, fallback to stub if write fails
         try:
             pdf.output(out_path)
-        except Exception as e:
-            st.warning(f"Couldn’t write PDF #{idx}: {e}")
+        except Exception:
+            # Generate minimal stub PDF
+            stub = FPDF()
+            stub.add_page()
+            stub.set_font("Arial", size=12)
+            stub.multi_cell(0, 10, "[Unable to generate this email PDF]")
+            stub.output(out_path)
 
+        # Update progress bar
         progress_callback(idx / total)
 
     st.info(f"✅ {total}/{total} emails converted to PDF.")
     return True
 
 # Streamlit UI
-st.title("📧 Outlook .msg → PDF (unique filenames)")
-st.markdown("Upload a `.zip` of `.msg` files; each one becomes a PDF named `####_subject.pdf`.")
+st.title("📧 Outlook .msg → PDF (no attachments)")
+st.markdown("Upload a `.zip` of `.msg` files; each one becomes a uniquely named PDF.")
 
-up = st.file_uploader("ZIP with .msg emails", type="zip")
-if up and st.button("Convert"):
-    with st.spinner("Working…"):
-        td = tempfile.mkdtemp()
-        od = os.path.join(td, "pdfs")
-        os.makedirs(od, exist_ok=True)
-        bar = st.progress(0.0)
-        ok = convert_zipped_msg_files(up, od, lambda p: bar.progress(p))
-        if not ok:
-            st.error("No .msg files found.")
+uploaded = st.file_uploader("ZIP with .msg emails", type="zip")
+if uploaded and st.button("Convert Emails to PDFs"):
+    with st.spinner("Processing emails…"):
+        temp_dir = tempfile.mkdtemp()
+        output_dir = os.path.join(temp_dir, "pdf_output")
+        os.makedirs(output_dir, exist_ok=True)
+        progress_bar = st.progress(0.0)
+        success = convert_zipped_msg_files(uploaded, output_dir, lambda p: progress_bar.progress(p))
+        if not success:
+            st.error("No .msg files found or conversion failed.")
         else:
-            # Zip and provide download
-            zip_out = os.path.join(td, "out.zip")
+            # Zip up PDFs
+            zip_out = os.path.join(temp_dir, "converted_pdfs.zip")
             with zipfile.ZipFile(zip_out, 'w') as zf:
-                for r, _, files in os.walk(od):
-                    for fn in files:
-                        full = os.path.join(r, fn)
-                        zf.write(full, os.path.relpath(full, od))
+                for root, _, files in os.walk(output_dir):
+                    for f in files:
+                        full = os.path.join(root, f)
+                        zf.write(full, os.path.relpath(full, output_dir))
             with open(zip_out, "rb") as f:
-                st.download_button("📥 Download PDFs", data=f, file_name="converted_pdfs.zip", mime="application/zip")
-            st.success("Done—one unique PDF per .msg!")
+                st.download_button(
+                    label="📥 Download Converted PDFs",
+                    data=f,
+                    file_name="converted_pdfs.zip",
+                    mime="application/zip"
+                )
+            st.success("Conversion complete—one valid PDF per message!")
