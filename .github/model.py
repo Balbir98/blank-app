@@ -8,37 +8,32 @@ from fpdf import FPDF
 import matplotlib.pyplot as plt
 import tempfile
 
-st.title("Adviser Income Forecast & Performance Flagging with PDF Export")
+st.title("Adviser Income Forecast & Performance Flagging (Clean Predictors)")
 
 uploaded_file = st.file_uploader("Upload adviser dataset (CSV)", type="csv")
 if uploaded_file:
-    # Load and preview data
+    # Load data
     df = pd.read_csv(uploaded_file)
     st.subheader("Data Preview")
     st.dataframe(df.head())
 
-    # Columns used as features
+    # ---- Define clean predictors only ----
     feature_cols = [
         'Months Since Authorisation',
-        'Number of Events Attended All Time',
         'Events Attended Last 12 Months',
         '# CRM Cases All Time',
-        'File Review Pass Count',
-        'File Review Fail Count',
         'File Review Pass %',
-        'Forecasted Revenue',
-        'Total Commission Earned Since Authorisation',
-        'Total Commission Earned Last Year',
-        'Total Commission Earned Year To Date'
+        'Forecasted Revenue'
     ]
 
-    # Ensure numeric types
+    # Ensure numeric types for predictors
     df['File Review Pass %'] = pd.to_numeric(df['File Review Pass %'], errors='coerce')
     df['Forecasted Revenue'] = pd.to_numeric(df['Forecasted Revenue'], errors='coerce')
-    # Drop rows missing any feature or target
+
+    # Drop rows missing predictors or the target
     df_clean = df.dropna(subset=feature_cols + ['Annualised Projected Income Current Year'])
 
-    # --- Regression Model ---
+    # ---- Regression: forecast income using only true predictors ----
     X = df_clean[feature_cols]
     y_reg = df_clean['Annualised Projected Income Current Year']
 
@@ -49,12 +44,11 @@ if uploaded_file:
     r2 = r2_score(y_test, y_pred_reg)
     importances_reg = pd.Series(reg.feature_importances_, index=feature_cols).sort_values(ascending=False)
 
-    # Show regression results
-    st.subheader("Income Forecasting (Regression)")
-    st.write(f"R² score: **{r2:.2f}**")
+    st.subheader("Clean Regression Results")
+    st.write(f"R² with clean predictors: **{r2:.2f}**")
     st.bar_chart(importances_reg)
 
-    # --- Classification Model ---
+    # ---- Classification: underperformer flagging with same predictors ----
     df_clean['Underperformer'] = (
         df_clean['Total Commission Earned Year To Date'] <= df_clean['Total Commission Earned Last Year']
     ).astype(int)
@@ -70,12 +64,11 @@ if uploaded_file:
     report_df = pd.DataFrame(report).transpose()
     importances_clf = pd.Series(clf.feature_importances_, index=feature_cols).sort_values(ascending=False)
 
-    # Show classification results
-    st.subheader("Underperformer Flagging (Classification)")
+    st.subheader("Clean Classification Results")
     st.dataframe(report_df)
     st.bar_chart(importances_clf)
 
-    # --- Generate charts for PDF ---
+    # ---- Generate charts for PDF ----
     # Regression feature importance chart
     plt.figure(figsize=(8, 4))
     importances_reg.plot.bar()
@@ -98,7 +91,7 @@ if uploaded_file:
     plt.savefig(clf_chart, dpi=150)
     plt.close()
 
-    # --- Build PDF report ---
+    # ---- Build PDF report ----
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 16)
@@ -125,11 +118,11 @@ if uploaded_file:
     for feature, coef in importances_reg.items():
         pdf.cell(0, 6, f"{feature:<40} {coef:.4f}", ln=True)
 
-    # Offer PDF download
+    # Download PDF
     pdf_bytes = pdf.output(dest='S').encode('latin-1')
     st.download_button(
         label="Download Insight Report (PDF)",
         data=pdf_bytes,
-        file_name="adviser_insights.pdf",
+        file_name="adviser_insights_clean.pdf",
         mime="application/pdf"
     )
