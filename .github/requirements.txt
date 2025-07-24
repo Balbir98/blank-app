@@ -8,6 +8,4 @@ bs4
 asyncio
 fpdf
 extract_msg
-sklearn
 scikit-learn
-
