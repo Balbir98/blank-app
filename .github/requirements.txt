@@ -9,3 +9,4 @@ asyncio
 fpdf
 extract_msg
 scikit-learn
+matplotlib
