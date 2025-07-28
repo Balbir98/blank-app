@@ -18,12 +18,18 @@ if uploaded_file:
     st.dataframe(df.head())
 
     # ---- Ensure commission columns exist & fill missing for classification ----
-    # Treat missing commission as zero
     for col in ["Total Commission Earned Year To Date", "Total Commission Earned Last Year"]:
         if col not in df.columns:
             df[col] = 0
         else:
             df[col] = df[col].fillna(0)
+    
+    # ---- Ensure regression target exists & fill missing with 0 ----
+    target_col = "Annualised Projected Income Current Year"
+    if target_col not in df.columns and "Annualised Projected Income Current Year" not in df.columns:
+        # if differently named adjust here...
+        pass
+    df[target_col] = df.get(target_col, pd.Series(0, index=df.index)).fillna(0)
 
     # ---- Define clean predictors only ----
     feature_cols = [
@@ -39,12 +45,8 @@ if uploaded_file:
     df['Forecasted Revenue'] = pd.to_numeric(df['Forecasted Revenue'], errors='coerce')
 
     # ---- Prepare data for regression ----
-    # Regression needs only predictors + target
-    target_col = 'Annualised Projected Income Current Year'
-    if target_col not in df.columns and 'Projected Income Current Year' in df.columns:
-        df.rename(columns={'Projected Income Current Year': target_col}, inplace=True)
-
-    reg_df = df.dropna(subset=feature_cols + [target_col])
+    # Now only drop if predictors missing, not target
+    reg_df = df.dropna(subset=feature_cols)
     n_reg = len(reg_df)
     st.write(f"Records for regression: {n_reg}")
 
@@ -70,7 +72,6 @@ if uploaded_file:
         st.error("Not enough data for regression.")
 
     # ---- Prepare data for classification ----
-    # Classification uses all rows, since commission fields are zero-filled
     clf_df = df.copy()
     n_clf = len(clf_df)
     st.write(f"Records for classification: {n_clf}")
@@ -103,10 +104,10 @@ if uploaded_file:
     else:
         st.error("Not enough data for classification.")
 
-    # ---- Generate charts for PDF ----
+    # ---- Generate charts & PDF ----
     if 'importances_reg' in locals() and 'importances_clf' in locals():
-        # Regression feature importance chart
-        plt.figure(figsize=(8, 4))
+        # Regression chart
+        plt.figure(figsize=(8,4))
         importances_reg.plot.bar()
         plt.title("Feature Importance for Income Forecast")
         plt.ylabel("Importance")
@@ -116,8 +117,8 @@ if uploaded_file:
         plt.savefig(reg_chart, dpi=150)
         plt.close()
 
-        # Classification feature importance chart
-        plt.figure(figsize=(8, 4))
+        # Classification chart
+        plt.figure(figsize=(8,4))
         importances_clf.plot.bar(color='orange')
         plt.title("Feature Importance for Underperformance Flag")
         plt.ylabel("Importance")
@@ -127,7 +128,7 @@ if uploaded_file:
         plt.savefig(clf_chart, dpi=150)
         plt.close()
 
-        # ---- Build PDF report ----
+        # Build PDF
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Arial", 'B', 16)
