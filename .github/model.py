@@ -17,21 +17,15 @@ if uploaded_file:
     st.subheader("Data Preview")
     st.dataframe(df.head())
 
-    # ---- Ensure commission columns exist & fill missing for classification ----
+    # ---- Zero-fill commission columns for classification ----
     for col in ["Total Commission Earned Year To Date", "Total Commission Earned Last Year"]:
-        if col not in df.columns:
-            df[col] = 0
-        else:
-            df[col] = df[col].fillna(0)
-    
-    # ---- Ensure regression target exists & fill missing with 0 ----
-    target_col = "Annualised Projected Income Current Year"
-    if target_col not in df.columns and "Annualised Projected Income Current Year" not in df.columns:
-        # if differently named adjust here...
-        pass
-    df[target_col] = df.get(target_col, pd.Series(0, index=df.index)).fillna(0)
+        df[col] = df.get(col, 0).fillna(0)
 
-    # ---- Define clean predictors only ----
+    # ---- Zero-fill regression target ----
+    target_col = "Annualised Projected Income Current Year"
+    df[target_col] = df.get(target_col, 0).fillna(0)
+
+    # ---- Define and zero-fill clean predictors ----
     feature_cols = [
         'Months Since Authorisation',
         'Events Attended Last 12 Months',
@@ -39,14 +33,16 @@ if uploaded_file:
         'File Review Pass %',
         'Forecasted Revenue'
     ]
-
-    # Ensure numeric types for predictors
-    df['File Review Pass %'] = pd.to_numeric(df['File Review Pass %'], errors='coerce')
-    df['Forecasted Revenue'] = pd.to_numeric(df['Forecasted Revenue'], errors='coerce')
+    # Fill missing predictor values with zero
+    for feat in feature_cols:
+        df[feat] = df.get(feat, 0).fillna(0)
+    # Ensure numeric types
+    df['File Review Pass %'] = pd.to_numeric(df['File Review Pass %'], errors='coerce').fillna(0)
+    df['Forecasted Revenue'] = pd.to_numeric(df['Forecasted Revenue'], errors='coerce').fillna(0)
 
     # ---- Prepare data for regression ----
-    # Now only drop if predictors missing, not target
-    reg_df = df.dropna(subset=feature_cols)
+    # Use entire df since all predictors and target zero-filled
+    reg_df = df.copy()
     n_reg = len(reg_df)
     st.write(f"Records for regression: {n_reg}")
 
