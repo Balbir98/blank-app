@@ -13,20 +13,30 @@ if uploaded_file:
 
     @st.cache_data
     def load_csv(file):
-        # 1) Try standard UTF-8, comma
+        # Try the default UTF-8/ C engine first
         try:
             return pd.read_csv(file)
         except Exception:
-            # 2) Sniff delimiter & python engine
+            # Fallback: read raw bytes, decode with UTF-8 if possible else Latin-1
             file.seek(0)
-            raw = file.read().decode("utf-8", errors="replace")
-            dialect = csv.Sniffer().sniff(raw[:10_000])
+            raw_bytes = file.read()
             try:
-                return pd.read_csv(io.StringIO(raw), sep=dialect.delimiter, engine="python")
-            except Exception:
-                # 3) Fallback to Latin-1
-                file.seek(0)
-                return pd.read_csv(file, encoding="latin-1", sep=dialect.delimiter, engine="python")
+                raw_text = raw_bytes.decode("utf-8")
+                encoding = "utf-8"
+            except UnicodeDecodeError:
+                raw_text = raw_bytes.decode("latin-1")
+                encoding = "latin-1"
+
+            # sniff delimiter from the decoded text
+            dialect = csv.Sniffer().sniff(raw_text[:10_000])
+            sep = dialect.delimiter
+
+            # re-load via python engine with correct encoding
+            return pd.read_csv(
+                io.StringIO(raw_text),
+                sep=sep,
+                engine="python",
+            )
 
     df = load_csv(uploaded_file)
 
@@ -44,34 +54,28 @@ if uploaded_file:
         else:
             return val  # leave blanks/others
 
-    # Set up progress UI
+    # progress bar setup
     prog = st.progress(0)
     status = st.empty()
 
-    # Count steps: one per column + one to write CSV
     cols_to_do = [c for c in bool_cols if c in df.columns]
     total_steps = len(cols_to_do) + 1
     step = 0
 
-    # 1) Transform each column
     for col in cols_to_do:
-        start = time.perf_counter()
         df[col] = df[col].apply(transform_bool)
         step += 1
-        elapsed = time.perf_counter() - start
-        # assume roughly 1s per step for estimation
-        remaining_secs = max(0, total_steps - step)
         prog.progress(step / total_steps)
-        status.text(f"Transforming “{col}” — ≈ {remaining_secs}s remaining")
+        status.text(f"Transforming “{col}” — ≈ {total_steps-step}s remaining")
 
-    # 2) Generate CSV bytes
     status.text("Generating cleaned CSV…")
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    # use UTF-8 with BOM so Excel/Zoho will correctly see the £
+    csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+
     step += 1
     prog.progress(step / total_steps)
     status.text("All done!")
 
-    # Download button
     st.download_button(
         label="Download cleaned CSV",
         data=csv_bytes,
