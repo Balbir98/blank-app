@@ -13,29 +13,29 @@ if uploaded_file:
 
     @st.cache_data
     def load_csv(file):
-        # Try the default UTF-8/ C engine first
+        # force these ID columns to stay exact
+        dtype_map = {"Adviser ID": str, "Firm ID": str}
+
+        # Try the default UTF-8/c-engine with our dtype map
         try:
-            return pd.read_csv(file)
+            return pd.read_csv(file, dtype=dtype_map)
         except Exception:
-            # Fallback: read raw bytes, decode with UTF-8 if possible else Latin-1
+            # Fallback: raw bytes → text (utf-8 or latin-1) → sniff delimiter
             file.seek(0)
             raw_bytes = file.read()
             try:
                 raw_text = raw_bytes.decode("utf-8")
-                encoding = "utf-8"
             except UnicodeDecodeError:
                 raw_text = raw_bytes.decode("latin-1")
-                encoding = "latin-1"
 
-            # sniff delimiter from the decoded text
             dialect = csv.Sniffer().sniff(raw_text[:10_000])
             sep = dialect.delimiter
 
-            # re-load via python engine with correct encoding
             return pd.read_csv(
                 io.StringIO(raw_text),
                 sep=sep,
                 engine="python",
+                dtype=dtype_map,
             )
 
     df = load_csv(uploaded_file)
@@ -52,9 +52,8 @@ if uploaded_file:
         elif val == "f":
             return False
         else:
-            return val  # leave blanks/others
+            return val
 
-    # progress bar setup
     prog = st.progress(0)
     status = st.empty()
 
@@ -69,9 +68,8 @@ if uploaded_file:
         status.text(f"Transforming “{col}” — ≈ {total_steps-step}s remaining")
 
     status.text("Generating cleaned CSV…")
-    # use UTF-8 with BOM so Excel/Zoho will correctly see the £
+    # utf-8-sig to preserve £ etc.
     csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-
     step += 1
     prog.progress(step / total_steps)
     status.text("All done!")
