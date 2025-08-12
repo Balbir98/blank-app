@@ -2,6 +2,22 @@
 import pandas as pd
 import streamlit as st
 
+APP_PASSWORD = st.secrets.get("APP_PASSWORD", "")
+
+if "auth_ok" not in st.session_state:
+    st.session_state["auth_ok"] = False
+
+if not st.session_state["auth_ok"]:
+    st.write("This tool is restricted. Please enter the access password.")
+    pw = st.text_input("Password", type="password")
+    if st.button("Unlock"):
+        if pw == APP_PASSWORD:
+            st.session_state["auth_ok"] = True
+            st.success("Access granted.")
+        else:
+            st.error("Incorrect password.")
+    st.stop()
+
 st.set_page_config(page_title="Mortgage Rate Review PII", layout="centered")
 
 st.title("Mortgage Rate Review PII")
