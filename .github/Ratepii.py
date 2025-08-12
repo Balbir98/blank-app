@@ -1,5 +1,4 @@
 # streamlit_app.py
-import io
 import pandas as pd
 import streamlit as st
 
@@ -31,35 +30,14 @@ with col2:
 st.divider()
 
 # --- constants / config ---
-# Extra headers to append from the Combined Case Report (in your requested order)
+# PII headers to bring from Combined Case Report (we'll select a subset for final output)
 EXTRA_HEADERS = [
     "Full name",  # computed from First name + Last name
-    "Dob",
-    "Address1",
-    "Address2",
-    "Address3",
-    "Posttown",
-    "Postcode",
-    "County",
-    "Country",
-    "Email address",
-    "Mobile phone",
-    "Home phone",
-    "Work phone",
-    "Created year",
-    "Created month",
-    "Created week",
-    "Created at",
-    "Case type",
-    "Regulated",
-    "Case status",
-    "Mortgage status",
-    "Mortgage amount",
-    "Property value",
-    "Term",
-    "Term unit",
-    "N clients",
-    "Ltv",
+    "Dob", "Address1", "Address2", "Address3", "Posttown", "Postcode", "County", "Country",
+    "Email address", "Mobile phone", "Home phone", "Work phone",
+    "Created year", "Created month", "Created week", "Created at",
+    "Case type", "Regulated", "Case status", "Mortgage status",
+    "Mortgage amount", "Property value", "Term", "Term unit", "N clients", "Ltv",
 ]
 
 # canonical names we expect to find in the Combined Case Report
@@ -73,6 +51,52 @@ CC_REQUIRED_BASE = [
 
 JOIN_KEY = "Case id"  # expected in both reports
 
+# Final output columns (and order)
+OUTPUT_ORDER = [
+    "Advisor name",
+    "Case id",
+    "Case URL",
+    "Mtg completion date",
+    "Mortgage id",
+    "Lender name",
+    "Status",
+    "Initial rate",
+    "Initial rate end date",
+    "Current reminder date",
+    "Reminder status",
+    "Full name",
+    "Dob",
+    "Address1",
+    "Address2",
+    "Address3",
+    "Posttown",
+    "Postcode",
+    "County",
+    "Country",
+    "Email address",
+    "Mobile phone",
+    "Home phone",
+    "Work phone",
+    "Created at",
+    "Case type",
+    "Case status",
+    "Property value",
+    "N clients",
+]
+
+# The subset of columns expected to come from Rate Review (we'll map them case-insensitively)
+RR_EXPECTED_COLS = [
+    "Advisor name",
+    "Case id",
+    "Mtg completion date",
+    "Mortgage id",
+    "Lender name",
+    "Status",
+    "Initial rate",
+    "Initial rate end date",
+    "Current reminder date",
+    "Reminder status",
+]
 
 def read_any(file) -> pd.DataFrame:
     if file is None:
@@ -84,51 +108,37 @@ def read_any(file) -> pd.DataFrame:
         return pd.read_excel(file)
     raise ValueError("Unsupported file type. Please upload CSV or Excel.")
 
-
 def norm(s: str) -> str:
     """Normalize a column name for matching (lowercase, strip, collapse spaces/underscores)."""
     return " ".join(str(s).strip().replace("_", " ").split()).lower()
 
-
 def build_lookup(cols):
     """Create a case-insensitive lookup {normalized_name: original_name} for a DataFrame's columns."""
-    lk = {}
-    for c in cols:
-        lk[norm(c)] = c
-    return lk
-
+    return {norm(c): c for c in cols}
 
 def find_col(lookup: dict, target_name: str, alt_variants=None):
     """
     Find a column in lookup by a canonical name with some common variants.
     Returns original column name or None.
     """
-    candidates = [target_name]
-    if alt_variants:
-        candidates.extend(alt_variants)
-
-    # common harmless variants (ID/id/Id, etc.)
+    candidates = [target_name] + (alt_variants or [])
     t = target_name
     if " id" in t.lower():
-        candidates.append(t.replace(" id", " ID"))
-        candidates.append(t.replace(" id", " Id"))
-
+        candidates += [t.replace(" id", " ID"), t.replace(" id", " Id")]
     for c in candidates:
         hit = lookup.get(norm(c))
         if hit:
             return hit
     return None
 
-
 def safe_merge(rr: pd.DataFrame, cc: pd.DataFrame):
-    # Build lookups
+    # Lookups
     rr_lk = build_lookup(rr.columns)
     cc_lk = build_lookup(cc.columns)
 
-    # Find join key in both
+    # Join keys
     rr_key = find_col(rr_lk, JOIN_KEY, alt_variants=["Case ID", "case id", "CaseId"])
     cc_key = find_col(cc_lk, JOIN_KEY, alt_variants=["Case ID", "case id", "CaseId"])
-
     if rr_key is None or cc_key is None:
         missing_side = []
         if rr_key is None:
@@ -140,8 +150,7 @@ def safe_merge(rr: pd.DataFrame, cc: pd.DataFrame):
             f"Make sure both reports include a '{JOIN_KEY}' column."
         )
 
-    # Prepare Combined Case subset with computed Full name
-    # Map base fields
+    # Map CC columns we need
     cc_map = {}
     missing_in_cc = []
     for base in CC_REQUIRED_BASE:
@@ -149,15 +158,14 @@ def safe_merge(rr: pd.DataFrame, cc: pd.DataFrame):
         if col is None:
             missing_in_cc.append(base)
         else:
-            cc_map[base] = col  # canonical -> actual
+            cc_map[base] = col  # canonical -> actual col name in CC
 
-    # Compute Full name (even if First/Last missing, we’ll fill with empty strings)
+    # Compute Full name from First/Last
     first_col = cc_map.get("First name")
     last_col = cc_map.get("Last name")
 
     cc_subset = cc[[cc_key] + [v for k, v in cc_map.items() if k not in ("First name", "Last name")]].copy()
 
-    # create Full name
     if first_col is None or last_col is None:
         cc_subset["Full name"] = ""
     else:
@@ -166,45 +174,56 @@ def safe_merge(rr: pd.DataFrame, cc: pd.DataFrame):
             cc[last_col].fillna("").astype(str).str.strip()
         ).str.strip()
 
-    # Reorder and rename cc_subset columns to the requested EXTRA_HEADERS order
-    # Start by ensuring all headers exist; if some are missing we create empty columns
-    cc_subset_renamed = pd.DataFrame()
-    cc_subset_renamed[cc_key] = cc_subset[cc_key]
-
-    # build a temp dict of source series by canonical key
+    # Build a source dict by canonical name
     source = {k: cc[v] for k, v in cc_map.items() if k not in ("First name", "Last name")}
     source["Full name"] = cc_subset["Full name"]
 
-    for h in EXTRA_HEADERS:
-        if h == "Full name":
-            cc_subset_renamed[h] = source["Full name"]
+    # Rebuild CC subset with canonical headers we care about (only those used in final OUTPUT_ORDER)
+    needed_from_cc = list(set(OUTPUT_ORDER) & set(EXTRA_HEADERS))
+    cc_out = pd.DataFrame()
+    cc_out[cc_key] = cc[cc_key]
+    for h in needed_from_cc:
+        series = source.get(h)
+        if series is not None:
+            cc_out[h] = series
         else:
-            # map canonical to canonical for renaming
-            series = source.get(h)
-            if series is not None:
-                cc_subset_renamed[h] = series
-            else:
-                # create empty column if missing
-                cc_subset_renamed[h] = pd.Series([None] * len(cc_subset_renamed))
+            cc_out[h] = pd.NA
 
-    # Merge (left join to keep all Rate Review rows)
+    # Merge (left join keeps all RR rows; note: duplicates in CC can still expand rows)
     merged = rr.merge(
-        cc_subset_renamed,
+        cc_out,
         left_on=rr_key,
         right_on=cc_key,
         how="left",
         indicator=True
     )
 
-    # Build output with all Rate Review columns first, then append EXTRA_HEADERS
-    rr_cols = rr.columns.tolist()
-    # ensure we don't duplicate join key from right
-    drop_cols = {cc_key}
-    keep_extras = [c for c in EXTRA_HEADERS if c not in rr_cols and c not in drop_cols]
+    # Build Case URL based on RR key column
+    case_series = merged[rr_key].astype(str).str.strip()
+    merged["Case URL"] = "https://crm.myac.re/cases/" + case_series + "/overview"
 
-    out_cols = rr_cols + keep_extras
-    merged = merged.drop(columns=[c for c in merged.columns if c not in out_cols and c not in rr_cols], errors="ignore")
-    merged = merged[out_cols]
+    # Map RR expected columns to their actual names
+    rr_mapped_cols = {}
+    for c in RR_EXPECTED_COLS:
+        hit = find_col(rr_lk, c)
+        if hit:
+            rr_mapped_cols[c] = hit
+
+    # Ensure "Case id" in output maps to the RR key's display name "Case id"
+    # If the RR key column isn't literally named "Case id", we add a canonical "Case id" column.
+    if "Case id" not in merged.columns:
+        merged["Case id"] = merged[rr_key]
+
+    # Assemble final columns in OUTPUT_ORDER
+    final_df = pd.DataFrame()
+    for col in OUTPUT_ORDER:
+        if col in merged.columns:
+            final_df[col] = merged[col]
+        elif col in rr_mapped_cols:
+            final_df[col] = merged[rr_mapped_cols[col]]
+        else:
+            # If not found, create blank column to preserve order
+            final_df[col] = pd.NA
 
     # Metrics
     matched = int((merged["_merge"] == "both").sum()) if "_merge" in merged.columns else None
@@ -212,14 +231,13 @@ def safe_merge(rr: pd.DataFrame, cc: pd.DataFrame):
     if "_merge" in merged.columns:
         merged = merged.drop(columns=["_merge"])
 
-    return merged, {
+    return final_df, {
         "rr_key": rr_key,
         "cc_key": cc_key,
         "matched": matched,
         "total": total,
         "missing_in_cc": missing_in_cc
     }
-
 
 def generate_download(df: pd.DataFrame, default_name="mortgage_rate_review_pii.csv"):
     csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
@@ -230,7 +248,6 @@ def generate_download(df: pd.DataFrame, default_name="mortgage_rate_review_pii.c
         mime="text/csv",
         use_container_width=True
     )
-
 
 # --- Action button ---
 if st.button("Generate report", type="primary", use_container_width=True):
@@ -249,10 +266,8 @@ if st.button("Generate report", type="primary", use_container_width=True):
                 with st.spinner("Merging reports…"):
                     output_df, stats = safe_merge(rr_df, cc_df)
 
-                # Info / warnings
                 st.success(
-                    f"Report is ready! Matched {stats['matched']} of {stats['total']} "
-                    f"rows by **{JOIN_KEY}**."
+                    f"Report is ready! Matched {stats['matched']} of {stats['total']} rows by **{JOIN_KEY}**."
                 )
                 if stats["missing_in_cc"]:
                     st.warning(
@@ -261,10 +276,6 @@ if st.button("Generate report", type="primary", use_container_width=True):
                     )
 
                 generate_download(output_df)
-
-                # Optional: show preview
-                with st.expander("Preview first 50 rows"):
-                    st.dataframe(output_df.head(50), use_container_width=True)
 
         except KeyError as e:
             st.error(str(e))
