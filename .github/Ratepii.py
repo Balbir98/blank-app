@@ -30,28 +30,25 @@ with col2:
 st.divider()
 
 # --- constants / config ---
-# PII headers to bring from Combined Case Report (we'll select a subset for final output)
 EXTRA_HEADERS = [
-    "Full name",  # computed from First name + Last name
-    "Dob", "Address1", "Address2", "Address3", "Posttown", "Postcode", "County", "Country",
-    "Email address", "Mobile phone", "Home phone", "Work phone",
-    "Created year", "Created month", "Created week", "Created at",
-    "Case type", "Regulated", "Case status", "Mortgage status",
-    "Mortgage amount", "Property value", "Term", "Term unit", "N clients", "Ltv",
+    "Full name",
+    "Dob","Address1","Address2","Address3","Posttown","Postcode","County","Country",
+    "Email address","Mobile phone","Home phone","Work phone",
+    "Created year","Created month","Created week","Created at",
+    "Case type","Regulated","Case status","Mortgage status",
+    "Mortgage amount","Property value","Term","Term unit","N clients","Ltv",
 ]
 
-# canonical names we expect to find in the Combined Case Report
 CC_REQUIRED_BASE = [
-    "First name", "Last name", "Dob", "Address1", "Address2", "Address3", "Posttown",
-    "Postcode", "County", "Country", "Email address", "Mobile phone", "Home phone",
-    "Work phone", "Created year", "Created month", "Created week", "Created at",
-    "Case type", "Regulated", "Case status", "Mortgage status", "Mortgage amount",
-    "Property value", "Term", "Term unit", "N clients", "Ltv"
+    "First name","Last name","Dob","Address1","Address2","Address3","Posttown",
+    "Postcode","County","Country","Email address","Mobile phone","Home phone",
+    "Work phone","Created year","Created month","Created week","Created at",
+    "Case type","Regulated","Case status","Mortgage status","Mortgage amount",
+    "Property value","Term","Term unit","N clients","Ltv"
 ]
 
-JOIN_KEY = "Case id"  # expected in both reports
+JOIN_KEY = "Case id"
 
-# Final output columns (and order)
 OUTPUT_ORDER = [
     "Advisor name",
     "Case id",
@@ -84,7 +81,6 @@ OUTPUT_ORDER = [
     "N clients",
 ]
 
-# The subset of columns expected to come from Rate Review (we'll map them case-insensitively)
 RR_EXPECTED_COLS = [
     "Advisor name",
     "Case id",
@@ -109,18 +105,12 @@ def read_any(file) -> pd.DataFrame:
     raise ValueError("Unsupported file type. Please upload CSV or Excel.")
 
 def norm(s: str) -> str:
-    """Normalize a column name for matching (lowercase, strip, collapse spaces/underscores)."""
     return " ".join(str(s).strip().replace("_", " ").split()).lower()
 
 def build_lookup(cols):
-    """Create a case-insensitive lookup {normalized_name: original_name} for a DataFrame's columns."""
     return {norm(c): c for c in cols}
 
 def find_col(lookup: dict, target_name: str, alt_variants=None):
-    """
-    Find a column in lookup by a canonical name with some common variants.
-    Returns original column name or None.
-    """
     candidates = [target_name] + (alt_variants or [])
     t = target_name
     if " id" in t.lower():
@@ -131,12 +121,22 @@ def find_col(lookup: dict, target_name: str, alt_variants=None):
             return hit
     return None
 
+def clean_iso_date_to_ddmmyyyy(series: pd.Series) -> pd.Series:
+    """
+    Accepts strings like '2024-05-04T15:43:03Z' (or other parseables) and returns '04/05/2024'.
+    Unparseable values become blank strings.
+    """
+    s = series.astype(str).str.strip()
+    # remove anything from 'T' to the end (keeps 'YYYY-MM-DD' part if present)
+    s = s.str.replace(r"T.*$", "", regex=True)
+    # parse (supports yyyy-mm-dd and many others; dayfirst handles dd/mm/yyyy inputs too)
+    dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
+    return dt.dt.strftime("%d/%m/%Y").fillna("")
+
 def safe_merge(rr: pd.DataFrame, cc: pd.DataFrame):
-    # Lookups
     rr_lk = build_lookup(rr.columns)
     cc_lk = build_lookup(cc.columns)
 
-    # Join keys
     rr_key = find_col(rr_lk, JOIN_KEY, alt_variants=["Case ID", "case id", "CaseId"])
     cc_key = find_col(cc_lk, JOIN_KEY, alt_variants=["Case ID", "case id", "CaseId"])
     if rr_key is None or cc_key is None:
@@ -158,14 +158,12 @@ def safe_merge(rr: pd.DataFrame, cc: pd.DataFrame):
         if col is None:
             missing_in_cc.append(base)
         else:
-            cc_map[base] = col  # canonical -> actual col name in CC
+            cc_map[base] = col
 
-    # Compute Full name from First/Last
+    # Compute Full name
     first_col = cc_map.get("First name")
-    last_col = cc_map.get("Last name")
-
-    cc_subset = cc[[cc_key] + [v for k, v in cc_map.items() if k not in ("First name", "Last name")]].copy()
-
+    last_col  = cc_map.get("Last name")
+    cc_subset = cc[[cc_key] + [v for k, v in cc_map.items() if k not in ("First name","Last name")]].copy()
     if first_col is None or last_col is None:
         cc_subset["Full name"] = ""
     else:
@@ -174,22 +172,17 @@ def safe_merge(rr: pd.DataFrame, cc: pd.DataFrame):
             cc[last_col].fillna("").astype(str).str.strip()
         ).str.strip()
 
-    # Build a source dict by canonical name
+    # Build canonical CC output only for fields needed in final output
+    needed_from_cc = list(set(OUTPUT_ORDER) & set(EXTRA_HEADERS))
     source = {k: cc[v] for k, v in cc_map.items() if k not in ("First name", "Last name")}
     source["Full name"] = cc_subset["Full name"]
 
-    # Rebuild CC subset with canonical headers we care about (only those used in final OUTPUT_ORDER)
-    needed_from_cc = list(set(OUTPUT_ORDER) & set(EXTRA_HEADERS))
     cc_out = pd.DataFrame()
     cc_out[cc_key] = cc[cc_key]
     for h in needed_from_cc:
-        series = source.get(h)
-        if series is not None:
-            cc_out[h] = series
-        else:
-            cc_out[h] = pd.NA
+        cc_out[h] = source.get(h, pd.NA)
 
-    # Merge (left join keeps all RR rows; note: duplicates in CC can still expand rows)
+    # Merge (left join keeps all RR rows; duplicates in CC may expand rows)
     merged = rr.merge(
         cc_out,
         left_on=rr_key,
@@ -198,32 +191,28 @@ def safe_merge(rr: pd.DataFrame, cc: pd.DataFrame):
         indicator=True
     )
 
-    # Build Case URL based on RR key column
-    case_series = merged[rr_key].astype(str).str.strip()
-    merged["Case URL"] = "https://crm.myac.re/cases/" + case_series + "/overview"
+    # Case URL built from RR join key
+    merged["Case URL"] = "https://crm.myac.re/cases/" + merged[rr_key].astype(str).str.strip() + "/overview"
 
-    # Map RR expected columns to their actual names
-    rr_mapped_cols = {}
-    for c in RR_EXPECTED_COLS:
-        hit = find_col(rr_lk, c)
-        if hit:
-            rr_mapped_cols[c] = hit
-
-    # Ensure "Case id" in output maps to the RR key's display name "Case id"
-    # If the RR key column isn't literally named "Case id", we add a canonical "Case id" column.
+    # Ensure "Case id" column exists canonically
     if "Case id" not in merged.columns:
         merged["Case id"] = merged[rr_key]
 
-    # Assemble final columns in OUTPUT_ORDER
+    # Build final dataframe in requested order (map RR columns if they differ by case/spacing)
+    rr_mapped_cols = {c: find_col(rr_lk, c) for c in RR_EXPECTED_COLS}
     final_df = pd.DataFrame()
     for col in OUTPUT_ORDER:
         if col in merged.columns:
             final_df[col] = merged[col]
-        elif col in rr_mapped_cols:
+        elif col in rr_mapped_cols and rr_mapped_cols[col] in merged.columns:
             final_df[col] = merged[rr_mapped_cols[col]]
         else:
-            # If not found, create blank column to preserve order
             final_df[col] = pd.NA
+
+    # --- Date cleaning for two columns ---
+    for date_col in ["Mtg completion date", "Current reminder date"]:
+        if date_col in final_df.columns:
+            final_df[date_col] = clean_iso_date_to_ddmmyyyy(final_df[date_col])
 
     # Metrics
     matched = int((merged["_merge"] == "both").sum()) if "_merge" in merged.columns else None
@@ -281,3 +270,4 @@ if st.button("Generate report", type="primary", use_container_width=True):
             st.error(str(e))
         except Exception as e:
             st.error(f"Something went wrong while generating the report: {e}")
+            
