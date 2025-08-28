@@ -1,25 +1,43 @@
 # streamlit_app.py
+import logging
+import gc
 import pandas as pd
 import streamlit as st
 
+# ---- A) Quieter logs (avoid noisy tracebacks to logs) ----
+logging.getLogger("streamlit").setLevel(logging.WARNING)
+
+# Page config (early is best practice)
+st.set_page_config(page_title="Mortgage Rate Review PII", layout="centered")
+
+# ---- Password gate (with C) 5-try limit) ----
 APP_PASSWORD = st.secrets.get("APP_PASSWORD", "")
 
 if "auth_ok" not in st.session_state:
     st.session_state["auth_ok"] = False
+if "tries" not in st.session_state:
+    st.session_state["tries"] = 0
+
+LOCKOUT_LIMIT = 5
 
 if not st.session_state["auth_ok"]:
+    if st.session_state["tries"] >= LOCKOUT_LIMIT:
+        st.error("Too many attempts. Please try again later.")
+        st.stop()
+
     st.write("This tool is restricted. Please enter the access password.")
     pw = st.text_input("Password", type="password")
     if st.button("Unlock"):
-        if pw == APP_PASSWORD:
+        st.session_state["tries"] += 1
+        if pw == APP_PASSWORD and APP_PASSWORD:
             st.session_state["auth_ok"] = True
+            st.session_state["tries"] = 0  # reset after success
             st.success("Access granted.")
         else:
             st.error("Incorrect password.")
     st.stop()
 
-st.set_page_config(page_title="Mortgage Rate Review PII", layout="centered")
-
+# ---- App UI ----
 st.title("Mortgage Rate Review PII")
 st.write(
     "Upload **two** Acre exports: the **Mortgage Rate Review** report and the **Combined Case Report**. "
@@ -143,9 +161,7 @@ def clean_iso_date_to_ddmmyyyy(series: pd.Series) -> pd.Series:
     Unparseable values become blank strings.
     """
     s = series.astype(str).str.strip()
-    # remove anything from 'T' to the end (keeps 'YYYY-MM-DD' part if present)
     s = s.str.replace(r"T.*$", "", regex=True)
-    # parse (supports yyyy-mm-dd and many others; dayfirst handles dd/mm/yyyy inputs too)
     dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
     return dt.dt.strftime("%d/%m/%Y").fillna("")
 
@@ -225,7 +241,7 @@ def safe_merge(rr: pd.DataFrame, cc: pd.DataFrame):
         else:
             final_df[col] = pd.NA
 
-    # --- Date cleaning for two columns ---
+    # Date cleaning
     for date_col in ["Mtg completion date", "Current reminder date"]:
         if date_col in final_df.columns:
             final_df[date_col] = clean_iso_date_to_ddmmyyyy(final_df[date_col])
@@ -256,6 +272,7 @@ def generate_download(df: pd.DataFrame, default_name="mortgage_rate_review_pii.c
 
 # --- Action button ---
 if st.button("Generate report", type="primary", use_container_width=True):
+    if 'rr_file' not in st.session_state: pass  # no-op, just ensuring keys exist
     if rr_file is None or cc_file is None:
         st.error("Please upload **both** files before generating the report.")
     else:
@@ -282,8 +299,19 @@ if st.button("Generate report", type="primary", use_container_width=True):
 
                 generate_download(output_df)
 
+                # ---- B) Memory scrub: clear DataFrames from memory after rendering download button ----
+                try:
+                    del output_df
+                    del rr_df
+                    del cc_df
+                except NameError:
+                    pass
+                gc.collect()
+
         except KeyError as e:
+            # Schema guidance is safe to show
             st.error(str(e))
-        except Exception as e:
-            st.error(f"Something went wrong while generating the report: {e}")
-            
+        except Exception:
+            # A) Generic error to avoid leaking details/PII
+            st.error("Something went wrong. Please try again or contact support.")
+            # (Optional) If you later add logging, ensure it logs metadata only, not DataFrame contents.
