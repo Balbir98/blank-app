@@ -4,40 +4,62 @@ import gc
 import pandas as pd
 import streamlit as st
 
-# ---- A) Quieter logs (avoid noisy tracebacks to logs) ----
+# ---- A) Quieter logs ----
 logging.getLogger("streamlit").setLevel(logging.WARNING)
 
-# Page config (early is best practice)
 st.set_page_config(page_title="Mortgage Rate Review PII", layout="centered")
 
-# ---- Password gate (with C) 5-try limit) ----
+# ---- Password gate (2-step with C) 5-try limit) ----
 APP_PASSWORD = st.secrets.get("APP_PASSWORD", "")
 
+if "auth_pw_ok" not in st.session_state:
+    st.session_state["auth_pw_ok"] = False  # step 1 passed (password validated)
 if "auth_ok" not in st.session_state:
-    st.session_state["auth_ok"] = False
+    st.session_state["auth_ok"] = False     # step 2 passed (unlock pressed)
 if "tries" not in st.session_state:
     st.session_state["tries"] = 0
 
 LOCKOUT_LIMIT = 5
 
-if not st.session_state["auth_ok"]:
+def render_password_submit():
+    """Step 1: password entry + Submit button."""
     if st.session_state["tries"] >= LOCKOUT_LIMIT:
         st.error("Too many attempts. Please try again later.")
         st.stop()
 
     st.write("This tool is restricted. Please enter the access password.")
-    pw = st.text_input("Password", type="password")
-    if st.button("Unlock"):
+    pw = st.text_input("Password", type="password", key="pw_input")
+
+    # First step button label is 'Submit'
+    if st.button("Submit", type="primary"):
         st.session_state["tries"] += 1
-        if pw == APP_PASSWORD and APP_PASSWORD:
-            st.session_state["auth_ok"] = True
-            st.session_state["tries"] = 0  # reset after success
-            st.success("Access granted.")
+        if APP_PASSWORD and pw == APP_PASSWORD:
+            st.session_state["auth_pw_ok"] = True
+            st.session_state["tries"] = 0  # reset on success
+            st.success("Password accepted.")
         else:
-            st.error("Incorrect password.")
+            st.error("Wrong password.")
     st.stop()
 
-# ---- App UI ----
+def render_unlock_screen():
+    """Step 2: show a single Unlock button with instructions."""
+    st.success("Password accepted.")
+    st.info("Press **Unlock** to enter the app!")
+    if st.button("Unlock", type="primary", use_container_width=True):
+        st.session_state["auth_ok"] = True
+    st.stop()
+
+# Gate logic
+if not st.session_state["auth_ok"]:
+    if not APP_PASSWORD:
+        st.error("APP_PASSWORD is not set in Secrets. Please add it and reload.")
+        st.stop()
+    if not st.session_state["auth_pw_ok"]:
+        render_password_submit()     # Step 1
+    else:
+        render_unlock_screen()       # Step 2
+
+# ---- Main App UI (reached only after Unlock) ----
 st.title("Mortgage Rate Review PII")
 st.write(
     "Upload **two** Acre exports: the **Mortgage Rate Review** report and the **Combined Case Report**. "
@@ -156,10 +178,6 @@ def find_col(lookup: dict, target_name: str, alt_variants=None):
     return None
 
 def clean_iso_date_to_ddmmyyyy(series: pd.Series) -> pd.Series:
-    """
-    Accepts strings like '2024-05-04T15:43:03Z' (or other parseables) and returns '04/05/2024'.
-    Unparseable values become blank strings.
-    """
     s = series.astype(str).str.strip()
     s = s.str.replace(r"T.*$", "", regex=True)
     dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
@@ -272,7 +290,6 @@ def generate_download(df: pd.DataFrame, default_name="mortgage_rate_review_pii.c
 
 # --- Action button ---
 if st.button("Generate report", type="primary", use_container_width=True):
-    if 'rr_file' not in st.session_state: pass  # no-op, just ensuring keys exist
     if rr_file is None or cc_file is None:
         st.error("Please upload **both** files before generating the report.")
     else:
@@ -299,7 +316,7 @@ if st.button("Generate report", type="primary", use_container_width=True):
 
                 generate_download(output_df)
 
-                # ---- B) Memory scrub: clear DataFrames from memory after rendering download button ----
+                # ---- B) Memory scrub ----
                 try:
                     del output_df
                     del rr_df
@@ -309,9 +326,6 @@ if st.button("Generate report", type="primary", use_container_width=True):
                 gc.collect()
 
         except KeyError as e:
-            # Schema guidance is safe to show
             st.error(str(e))
         except Exception:
-            # A) Generic error to avoid leaking details/PII
             st.error("Something went wrong. Please try again or contact support.")
-            # (Optional) If you later add logging, ensure it logs metadata only, not DataFrame contents.
