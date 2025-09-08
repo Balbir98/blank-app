@@ -83,7 +83,7 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     """
     if form_df.shape[0] < 2:
         # Expect at least one header row (subheaders) + one data row
-        return pd.DataFrame(columns=['Random ID','Provider Name','Phone','Email','Type','Event Date (if applicable)','Product','Cost'])
+        return pd.DataFrame(columns=['Random ID','Name','Provider Name','Phone','Email','Type','Event Date (if applicable)','Product','Cost'])
 
     # Row 0 is the subheader row; respondents start from row 1.
     subheaders = form_df.iloc[0]
