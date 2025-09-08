@@ -16,9 +16,7 @@ from openpyxl.utils import get_column_letter
 # ---------------------------
 
 def _read_any_table(uploaded_file, preferred_sheet_name=None):
-    """
-    Read CSV or Excel into a DataFrame.
-    """
+    """Read CSV or Excel into a DataFrame."""
     name = uploaded_file.name.lower()
     ext = os.path.splitext(name)[1]
     if ext in [".csv", ".txt"]:
@@ -58,15 +56,12 @@ def _is_event_label(x):
         return True
     if s in ['Q1','Q2','Q3','Q4','Monthly','Quarterly']:
         return True
-    if re.search(r'\d', s):  # e.g., "4th February - Midlands"
+    if re.search(r'\d', s):
         return True
     return False
 
 def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Convert Zoho's wide export to normalized rows and join Cost from MOF sheet.
-    - “Option” rule is applied for both named and unnamed columns.
-    """
+    """Convert Zoho's wide export to normalized rows and join Cost from MOF sheet."""
     if form_df.shape[0] < 2:
         return pd.DataFrame(columns=[
             'Random ID','Provider Name','Name','Phone','Email',
@@ -84,7 +79,6 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
             if not str(col).startswith('Unnamed'):
                 if col not in ID_COLS and col not in ['Added Time', 'Referrer Name', 'Task Owner']:
                     current_type = col
-
             if pd.isna(val):
                 continue
 
@@ -92,9 +86,9 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
             text_val = str(val).strip()
 
             if not str(col).startswith('Unnamed'):
-                # Named column: apply Option rule too (bug fix)
                 if col in ID_COLS or col in ['Added Time', 'Referrer Name', 'Task Owner']:
                     continue
+                # "Option" bug fix also for named columns
                 if re.search(r'\boption(s)?\b', text_val, flags=re.I) and not pd.isna(sub):
                     prod = str(sub).strip()
                     evt = None if not _is_event_label(sub) else str(sub).strip()
@@ -103,12 +97,9 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
                 else:
                     prod = text_val
                     evt = str(sub).strip() if _is_event_label(sub) else None
-
                 records.append({'_ridx': ridx, 'Type': current_type,
                                 'Event Date (if applicable)': evt, 'Product': prod})
-
             else:
-                # Unnamed column path
                 if re.search(r'\boption(s)?\b', text_val, flags=re.I):
                     prod = str(sub).strip() if not pd.isna(sub) else text_val
                     evt = None
@@ -119,27 +110,20 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
                     else:
                         evt = None
                         prod = str(sub).strip() if not pd.isna(sub) else text_val
-
                 if current_type is None:
                     continue
-
                 records.append({'_ridx': ridx, 'Type': current_type,
                                 'Event Date (if applicable)': evt, 'Product': prod})
 
     out = pd.DataFrame.from_records(records)
-
-    # Attach ID columns
     for c in ID_COLS:
         out[c] = out['_ridx'].map(data_rows[c]) if c in data_rows.columns else None
-
     out = out[['Random ID','Provider Name','Name','Phone','Email',
                'Type','Event Date (if applicable)','Product']]
 
-    # Join Cost
     def _norm(s): return None if pd.isna(s) else str(s).strip()
     if not set(['Type','Product','Cost']).issubset(costs_df.columns):
         raise ValueError("Cost sheet must contain columns: Type, Product, Cost")
-
     costs2 = costs_df.copy()
     costs2['Type_norm'] = costs2['Type'].apply(_norm)
     costs2['Product_norm'] = costs2['Product'].apply(_norm)
@@ -160,7 +144,6 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------
 
 def _sanitize_name(name: str) -> str:
-    """Remove commas and extra whitespace."""
     if pd.isna(name):
         return ""
     s = str(name).replace(",", " ")
@@ -168,10 +151,8 @@ def _sanitize_name(name: str) -> str:
 
 def _find_table_header_row(ws):
     """
-    Find a row containing 'Type' and 'Product' (side-by-side), and also
-    'Month' and 'Date' on the same row somewhere to the right.
-    Return (header_row_index, header_col_index, header_map[original header text -> col]).
-    Only maps headers present on that row; later we only write to known headers.
+    Find a row containing Type & Product (adjacent) and also Month & Date somewhere to the right.
+    Return (header_row_index, header_col_index, header_map).
     """
     max_row = min(ws.max_row, 200)
     max_col = min(ws.max_column, 80)
@@ -191,13 +172,11 @@ def _find_table_header_row(ws):
                             v2 = ws.cell(r, c2).value
                             if v2 is None:
                                 continue
-                            key = str(v2).strip()
-                            hmap[key] = c2
+                            hmap[str(v2).strip()] = c2
                         return r, c, hmap
-    raise RuntimeError("Could not find the table header row with 'Type' and 'Product'.")
+    raise RuntimeError("Couldn't find the table header row (Type|Product ... Month ... Date).")
 
 def _get_col(hmap, key, aliases=()):
-    """Find a column by exact header or any alias (case-insensitive)."""
     if key in hmap:
         return hmap[key]
     lowered = {k.lower(): v for k, v in hmap.items()}
@@ -210,60 +189,43 @@ def _get_col(hmap, key, aliases=()):
             return lowered[a.lower()]
     return None
 
-def _unmerge_ranges_overlapping_table(ws, r1, r2, allowed_cols_set):
+def _unmerge_ranges_overlapping_table(ws, row_start, row_end, col_start, col_end):
     """
-    Unmerge any merged cell ranges that intersect the table rows (r1..r2)
-    AND whose columns intersect the table's allowed columns. This prevents
-    merged summary blocks from intruding into the data area after row inserts.
+    Unmerge any merged ranges that intersect the table band rows [row_start..row_end]
+    and ANY columns in [col_start..col_end]. This prevents merged H–K summary blocks
+    from sitting inside the table (which triggers write errors like (36, 9)).
     """
     to_unmerge = []
-    for m in list(ws.merged_cells.ranges):
-        min_col, min_row, max_col, max_row = m.min_col, m.min_row, m.max_col, m.max_row
-        row_overlap = not (max_row < r1 or min_row > r2)
-        col_overlap = any(c in allowed_cols_set for c in range(min_col, max_col + 1))
-        if row_overlap and col_overlap:
-            to_unmerge.append(m)
-    for m in to_unmerge:
-        ws.unmerge_cells(str(m))
+    for rng in list(ws.merged_cells.ranges):
+        min_c, min_r, max_c, max_r = rng.min_col, rng.min_row, rng.max_col, rng.max_row
+        rows_overlap = not (max_r < row_start or min_r > row_end)
+        cols_overlap = not (max_c < col_start or min_c > col_end)
+        if rows_overlap and cols_overlap:
+            to_unmerge.append(rng)
+    for rng in to_unmerge:
+        ws.unmerge_cells(str(rng))
 
 def _set_total_package_formula(ws, total_col_idx, first_data_row, last_data_row):
-    """
-    Locate a cell with text 'Total Package' and put a SUM formula in the next visible cell to the right.
-    Formula sums the Total column (preferred) across the table body. If Total column not found,
-    caller should pass Charge column index instead.
-    """
+    """Find 'Total Package' label and put =SUM(<total_col><first>:<total_col><last>) in the value cell to the right."""
     if total_col_idx is None:
         return
     col_letter = get_column_letter(total_col_idx)
     rng = f"{col_letter}{first_data_row}:{col_letter}{last_data_row}"
 
-    max_row = min(ws.max_row, 200)
-    max_col = min(ws.max_column, 80)
+    max_row = min(ws.max_row, 300)
+    max_col = min(ws.max_column, 120)
     for r in range(1, max_row + 1):
         for c in range(1, max_col + 1):
             v = ws.cell(r, c).value
             if v is not None and str(v).strip().lower() == "total package":
-                # Find a value cell to the right (first blank or numeric-capable)
-                dest_c = c + 1
-                # write formula
-                ws.cell(r, dest_c, f"=SUM({rng})")
+                ws.cell(r, c+1, f"=SUM({rng})")
                 return  # first match is enough
 
 def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame) -> BytesIO:
     """
     Returns a ZIP containing one populated template per Provider.
-    - Fixed cells:
-        B7 = Provider Name
-        B9 = Main contact (Name sans comma)
-        G9 = Phone
-        I9, B11, I15 = Email
-    - Table rows filled and styled; Total = Qty * Charge.
-    - Borders apply across through 'Notes' and 'When to Invoice' if those headers exist.
-    - Headers styled: Segoe UI 12 bold white.
-    - Any merged ranges that overlap the table body are unmerged to avoid corruption.
-    - "Total Package" formula is refreshed to sum the Total (preferred) or Charge column.
     """
-    # Optional F2F mapping from cost sheet
+    # Optional F2F mapping
     f2f_map = {}
     if 'F2F or Online?' in costs_df.columns:
         def _n(s): return None if pd.isna(s) else str(s).strip()
@@ -297,10 +259,12 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             ws["B11"] = email_val
             ws["I15"] = email_val
 
-            # Find table and headers
-            hdr_row, hdr_col, hmap = _find_table_header_row(ws)
+            # Table headers
+            try:
+                hdr_row, hdr_col, hmap = _find_table_header_row(ws)
+            except RuntimeError as e:
+                raise RuntimeError(f"{e} — make sure your template header row contains Type | Product | ... | Month | Date on the same row.")
 
-            # Explicit, safe mapping only to the intended columns
             c_Type   = _get_col(hmap, "Type")
             c_Prod   = _get_col(hmap, "Product")
             c_Month  = _get_col(hmap, "Month", aliases=("Event Month","Month of"))
@@ -312,7 +276,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             c_Notes  = _get_col(hmap, "Notes")
             c_When   = _get_col(hmap, "When to Invoice", aliases=("When To Invoice","When-to-Invoice"))
 
-            # Header style (Segoe UI 12 bold white)
             header_cols = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
             for c in header_cols:
                 ws.cell(hdr_row, c).font = header_font
@@ -320,15 +283,16 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             start_row = hdr_row + 1
             n = len(dfp)
 
-            # Insert rows to match number of items
+            # Insert rows to fit data
             if n > 1:
                 ws.insert_rows(start_row + 1, amount=n - 1)
 
-            # After insertion, unmerge any merged ranges that overlap the table body columns
-            allowed_cols_set = set(header_cols)
-            _unmerge_ranges_overlapping_table(ws, start_row, start_row + n - 1, allowed_cols_set)
+            # **CRITICAL FIX** — unmerge anything overlapping the table band across min..max mapped columns
+            first_col = min(header_cols) if header_cols else hdr_col
+            last_col  = max(header_cols) if header_cols else hdr_col+1
+            _unmerge_ranges_overlapping_table(ws, start_row, start_row + n - 1, first_col, last_col)
 
-            # Write only to mapped columns (prevents any writes to Q/R)
+            # Populate only mapped columns (prevents writes to Q/R, etc.)
             for i, (_, r) in enumerate(dfp.iterrows()):
                 rr = start_row + i
                 typ   = r.get("Type", "")
@@ -336,19 +300,16 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 month = r.get("Event Date (if applicable)", "")
                 qty   = 1
                 charge = r.get("Cost", None)
-
                 prod_key = None if pd.isna(prod) else str(prod).strip()
                 f2f_val = f2f_map.get(prod_key, "")
 
                 if c_Type:   ws.cell(rr, c_Type,   typ)
                 if c_Prod:   ws.cell(rr, c_Prod,   prod)
                 if c_Month:  ws.cell(rr, c_Month,  month)
-                if c_Date:   ws.cell(rr, c_Date,   None)         # blank
+                if c_Date:   ws.cell(rr, c_Date,   None)
                 if c_F2F:    ws.cell(rr, c_F2F,    f2f_val)
                 if c_Qty:    ws.cell(rr, c_Qty,    qty)
                 if c_Charge: ws.cell(rr, c_Charge, charge)
-
-                # Total = Qty * Charge
                 if c_Total:
                     try:
                         total_val = (qty or 0) * (float(charge) if charge not in [None, ""] else 0.0)
@@ -356,25 +317,23 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                         total_val = None
                     ws.cell(rr, c_Total, total_val)
 
-            # Apply borders & body font ONLY to the exact table columns
-            last_row = start_row + max(n - 1, 0)
+            # Borders & fonts just over the table columns
             for c in header_cols:
-                ws.cell(hdr_row, c).border = Border(top=Side(style='dotted'), bottom=Side(style='dotted'),
-                                                    left=Side(style='dotted'), right=Side(style='dotted'))
-            dotted = Side(style='dotted')
-            border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
-            font10 = Font(name="Segoe UI", size=10)
-            for rr in range(start_row, last_row + 1):
+                ws.cell(hdr_row, c).border = Border(top=Side(style='dotted'),
+                                                    bottom=Side(style='dotted'),
+                                                    left=Side(style='dotted'),
+                                                    right=Side(style='dotted'))
+            dotted = Side(style='dotted'); border = Border(top=dotted,bottom=dotted,left=dotted,right=dotted)
+            for rr in range(start_row, start_row + max(n - 1, 0) + 1):
                 for cc in header_cols:
                     cell = ws.cell(rr, cc)
                     cell.border = border
                     cell.font = font10
 
-            # Refresh "Total Package" formula: prefer 'Total' column; else use 'Charge'
+            # Refresh "Total Package" formula (sum of 'Total' col preferred; else 'Charge')
             summary_col = c_Total if c_Total else c_Charge
-            _set_total_package_formula(ws, summary_col, start_row, last_row)
+            _set_total_package_formula(ws, summary_col, start_row, start_row + max(n - 1, 0))
 
-            # Save workbook into ZIP under templates/
             out_bytes = BytesIO()
             wb.save(out_bytes)
             out_bytes.seek(0)
@@ -412,27 +371,13 @@ if st.button("Submit"):
         st.error("Please upload both the Zoho Forms export and the MOF Cost Sheet.")
     else:
         with st.spinner("Processing..."):
-            # Read inputs
             try:
                 form_df = _read_any_table(form_file, preferred_sheet_name="Form")
-            except Exception as e:
-                st.exception(RuntimeError(f"Failed to read the Zoho Forms export: {e}"))
-                st.stop()
-
-            try:
                 costs_df = _read_any_table(cost_file)
-            except Exception as e:
-                st.exception(RuntimeError(f"Failed to read the MOF Cost Sheet: {e}"))
-                st.stop()
-
-            # Transform
-            try:
                 cleaned = transform(form_df, costs_df)
             except Exception as e:
-                st.exception(e)
-                st.stop()
+                st.exception(e); st.stop()
 
-            # Build results.zip with templates (if provided) + data/cleaned_output.xlsx
             zip_buf = BytesIO()
             with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
                 # Add cleaned_output.xlsx
@@ -440,12 +385,11 @@ if st.button("Submit"):
                 cleaned.to_excel(cleaned_bytes, index=False)
                 zf.writestr("data/cleaned_output.xlsx", cleaned_bytes.getvalue())
 
-                # Optional: templates
+                # Add populated templates (if uploaded)
                 if template_file is not None:
                     try:
                         template_bytes = template_file.read()
                         tpl_zip = _populate_template_bytes(template_bytes, cleaned, costs_df)
-                        # Copy files from tpl_zip into templates/ folder in our main ZIP
                         with zipfile.ZipFile(tpl_zip, 'r') as tplzf:
                             for info in tplzf.infolist():
                                 zf.writestr(info.filename, tplzf.read(info.filename))
@@ -453,27 +397,10 @@ if st.button("Submit"):
                         st.exception(RuntimeError(f"Template population failed: {e}"))
 
             zip_buf.seek(0)
-
-            # Summary & download
             st.success(f"Done. Cleaned {len(cleaned)} rows.")
             st.dataframe(cleaned.head(100), use_container_width=True)
-
             missing_costs = cleaned['Cost'].isna().sum()
             if missing_costs > 0:
                 st.warning(f"{missing_costs} row(s) have no Cost match. Ensure (Type, Product) exist in the MOF Cost Sheet.")
-                with st.expander("Preview rows missing Cost"):
-                    st.dataframe(
-                        cleaned[cleaned['Cost'].isna()][
-                            ['Provider Name','Type','Event Date (if applicable)','Product']
-                        ].head(500)
-                    )
-
-            st.download_button(
-                "Download results.zip",
-                data=zip_buf.getvalue(),
-                file_name="results.zip",
-                mime="application/zip"
-            )
-
-st.markdown("---")
-st.caption("Headers: Segoe UI 12 bold white. Body: Segoe UI 10. Borders apply only to mapped table columns (no Q/R). Summary cells shift down intact; Total Package formula refreshed.")
+            st.download_button("Download results.zip", data=zip_buf.getvalue(),
+                               file_name="results.zip", mime="application/zip")
