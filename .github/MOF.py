@@ -17,8 +17,6 @@ from openpyxl.styles import Border, Side, Font
 def _read_any_table(uploaded_file, preferred_sheet_name=None):
     """
     Read CSV or Excel into a DataFrame.
-    - If file extension is .csv/.txt → try read_csv (python engine, sep=None) with UTF-8 then latin-1 fallback.
-    - If Excel (.xlsx/.xls) → try preferred sheet name, else first sheet.
     """
     name = uploaded_file.name.lower()
     ext = os.path.splitext(name)[1]
@@ -169,23 +167,26 @@ def _sanitize_name(name: str) -> str:
 
 def _find_table_header_row(ws):
     """
-    Find a row containing Type | Product and also Month and Date headers somewhere to the right.
-    Returns (header_row_index, header_col_index, header_map).
+    Find a row containing 'Type' and 'Product' (side-by-side), and also
+    'Month' and 'Date' on the same row somewhere to the right.
+    Return (header_row_index, header_col_index, header_map[original header text -> col]).
+    Only maps headers present on that row; later we only write to known headers.
     """
     max_row = min(ws.max_row, 200)
-    max_col = min(ws.max_column, 60)
+    max_col = min(ws.max_column, 80)
     for r in range(1, max_row + 1):
         row_vals = [ws.cell(r, c).value for c in range(1, max_col + 1)]
         for c in range(1, max_col):
             v = row_vals[c-1]
             if v is not None and str(v).strip().lower() == "type":
-                nextv = row_vals[c] if c < max_col else None
-                if nextv is not None and str(nextv).strip().lower() == "product":
-                    # scan for Month and Date on same row
+                nxt = row_vals[c] if c < max_col else None
+                if nxt is not None and str(nxt).strip().lower() == "product":
+                    # Check Month & Date exist to the right in this row
                     rest = row_vals[c-1:]
-                    if any((rv is not None and str(rv).strip().lower()=="month") for rv in rest) and \
-                       any((rv is not None and str(rv).strip().lower()=="date") for rv in rest):
-                        # build header map
+                    month_ok = any((rv is not None and str(rv).strip().lower()=="month") for rv in rest)
+                    date_ok  = any((rv is not None and str(rv).strip().lower()=="date")  for rv in rest)
+                    if month_ok and date_ok:
+                        # Build a precise header map: only non-empty cells on this header row
                         hmap = {}
                         for c2 in range(1, max_col + 1):
                             v2 = ws.cell(r, c2).value
@@ -196,12 +197,21 @@ def _find_table_header_row(ws):
                         return r, c, hmap
     raise RuntimeError("Could not find the table header row with 'Type' and 'Product'.")
 
-def _col(hmap, key, *aliases, default=None):
-    keys = (key,)+aliases
-    for k in keys:
-        if k in hmap:
-            return hmap[k]
-    return default
+def _get_col(hmap, key, aliases=()):
+    """Find a column by exact header or any alias (case-insensitive)."""
+    # try exact
+    if key in hmap:
+        return hmap[key]
+    # case-insensitive / alias search
+    lowered = {k.lower(): v for k, v in hmap.items()}
+    if key.lower() in lowered:
+        return lowered[key.lower()]
+    for a in aliases:
+        if a in hmap:
+            return hmap[a]
+        if a.lower() in lowered:
+            return lowered[a.lower()]
+    return None
 
 def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame) -> BytesIO:
     """
@@ -210,11 +220,10 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
         B7 = Provider Name
         B9 = Main contact (Name sans comma)
         G9 = Phone
-        I9 = Email
-        B11 = Email
-        I15 = Email
-    - Table rows filled from 'cleaned' and styled (dotted borders, Segoe UI 10).
-    - 'Total' column = Qty * Charge (value).
+        I9, B11, I15 = Email
+    - Table rows filled and styled; Total = Qty * Charge.
+    - Borders apply across through 'Notes' and 'When to Invoice' if those headers exist.
+    - Headers styled: Segoe UI, 12, bold, white font.
     """
     # Optional F2F mapping from cost sheet
     f2f_map = {}
@@ -227,9 +236,11 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
     groups = cleaned.groupby('Provider Name', dropna=False)
 
     zip_buf = BytesIO()
-    dashed = Side(style='dotted')  # dotted/dashed per request; using 'dotted'
-    border = Border(top=dashed, bottom=dashed, left=dashed, right=dashed)
+    # dotted borders per request
+    dotted = Side(style='dotted')
+    border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
     font10 = Font(name="Segoe UI", size=10)
+    header_font = Font(name="Segoe UI", size=12, bold=True, color="FFFFFF")
 
     with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for provider, dfp in groups:
@@ -249,27 +260,34 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             ws["B11"] = email_val
             ws["I15"] = email_val
 
-            # Find table
+            # Find table and headers
             hdr_row, hdr_col, hmap = _find_table_header_row(ws)
 
-            # Determine columns
-            c_Type   = _col(hmap, "Type")
-            c_Prod   = _col(hmap, "Product")
-            c_Month  = _col(hmap, "Month", "Event Month", "Month of")
-            c_Date   = _col(hmap, "Date")
-            c_F2F    = _col(hmap, "F2F or Online?", "F2F or Online", "F2F/Online")
-            c_Qty    = _col(hmap, "Qty", "Quantity")
-            c_Charge = _col(hmap, "Charge", "Cost", "Price")
-            c_Total  = _col(hmap, "Total")
+            # Explicit, safe mapping only to the intended columns
+            c_Type   = _get_col(hmap, "Type")
+            c_Prod   = _get_col(hmap, "Product")
+            c_Month  = _get_col(hmap, "Month", aliases=("Event Month","Month of"))
+            c_Date   = _get_col(hmap, "Date")
+            c_F2F    = _get_col(hmap, "F2F or Online?", aliases=("F2F or Online","F2F/Online"))
+            c_Qty    = _get_col(hmap, "Qty", aliases=("Quantity",))
+            c_Charge = _get_col(hmap, "Charge", aliases=("Cost","Price"))
+            c_Total  = _get_col(hmap, "Total")
+            c_Notes  = _get_col(hmap, "Notes")
+            c_When   = _get_col(hmap, "When to Invoice", aliases=("When To Invoice","When-to-Invoice"))
+
+            # Header styling (font only; template handles fill color)
+            cols_for_header = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
+            for c in cols_for_header:
+                ws.cell(hdr_row, c).font = header_font
 
             start_row = hdr_row + 1
             n = len(dfp)
 
-            # Insert rows so we have exactly n data rows beneath header
+            # Insert rows to match number of items
             if n > 1:
                 ws.insert_rows(start_row + 1, amount=n - 1)
 
-            # Fill data rows
+            # Write only to mapped columns (prevents accidental writes e.g. to Q/R)
             for i, (_, r) in enumerate(dfp.iterrows()):
                 rr = start_row + i
                 typ   = r.get("Type", "")
@@ -278,19 +296,18 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 qty   = 1
                 charge = r.get("Cost", None)
 
-                # F2F by product exact match
                 prod_key = None if pd.isna(prod) else str(prod).strip()
                 f2f_val = f2f_map.get(prod_key, "")
 
                 if c_Type:   ws.cell(rr, c_Type,   typ)
                 if c_Prod:   ws.cell(rr, c_Prod,   prod)
                 if c_Month:  ws.cell(rr, c_Month,  month)
-                if c_Date:   ws.cell(rr, c_Date,   None)
+                if c_Date:   ws.cell(rr, c_Date,   None)         # blank
                 if c_F2F:    ws.cell(rr, c_F2F,    f2f_val)
                 if c_Qty:    ws.cell(rr, c_Qty,    qty)
                 if c_Charge: ws.cell(rr, c_Charge, charge)
 
-                # Total = Qty * Charge (value)
+                # Total = Qty * Charge
                 if c_Total:
                     try:
                         total_val = (qty or 0) * (float(charge) if charge not in [None, ""] else 0.0)
@@ -298,24 +315,31 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                         total_val = None
                     ws.cell(rr, c_Total, total_val)
 
-            # Style the written table block (header + data)
+            # Borders + body font (Segoe UI 10) over full table width INCLUDING Notes / When to Invoice
             last_row = start_row + max(n - 1, 0)
-            # Choose a conservative last column = max of known important columns present
-            cols_present = [c for c in [c_Type, c_Prod, c_Month, c_Date, c_F2F, c_Qty, c_Charge, c_Total] if c]
-            if not cols_present:
-                cols_present = [hdr_col, hdr_col+1]  # fallback
-            last_col = max(cols_present)
+            table_cols = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
+            if not table_cols:
+                table_cols = [hdr_col, hdr_col+1]  # minimal safety
+            last_col = max(table_cols)
+            first_col = min(table_cols)
 
-            for r in range(hdr_row, last_row + 1):
-                for c in range(hdr_col, last_col + 1):
+            # Header row styling also gets borders & font 10? You asked size 12 for header;
+            # we'll keep header font at 12 and apply borders; body rows get size 10.
+            for c in range(first_col, last_col + 1):
+                cell = ws.cell(hdr_row, c)
+                cell.border = border  # border around header too
+
+            for r in range(start_row, last_row + 1):
+                for c in range(first_col, last_col + 1):
                     cell = ws.cell(r, c)
                     cell.border = border
                     cell.font = font10
 
-            # Save to ZIP under templates/
+            # Save workbook into ZIP under templates/
             out_bytes = BytesIO()
             wb.save(out_bytes)
             out_bytes.seek(0)
+
             safe_provider = re.sub(r'[^A-Za-z0-9 _.-]+', '_', provider_val or "Unknown_Provider")
             zf.writestr(f"templates/{safe_provider}.xlsx", out_bytes.getvalue())
 
@@ -382,10 +406,9 @@ if st.button("Submit"):
                     try:
                         template_bytes = template_file.read()
                         tpl_zip = _populate_template_bytes(template_bytes, cleaned, costs_df)
-                        # Unpack tpl_zip into templates/ folder in our main ZIP
+                        # Copy files from tpl_zip into templates/ folder in our main ZIP
                         with zipfile.ZipFile(tpl_zip, 'r') as tplzf:
                             for info in tplzf.infolist():
-                                # info.filename already starts with "templates/"
                                 zf.writestr(info.filename, tplzf.read(info.filename))
                     except Exception as e:
                         st.exception(RuntimeError(f"Template population failed: {e}"))
@@ -394,7 +417,6 @@ if st.button("Submit"):
 
             # Summary & download
             st.success(f"Done. Cleaned {len(cleaned)} rows.")
-            # Show a preview
             st.dataframe(cleaned.head(100), use_container_width=True)
 
             missing_costs = cleaned['Cost'].isna().sum()
@@ -415,4 +437,4 @@ if st.button("Submit"):
             )
 
 st.markdown("---")
-st.caption("Borders are dotted and table font is Segoe UI 10. Total is computed as Qty*Charge. Adjustments welcome!")
+st.caption("Headers: Segoe UI 12 bold white. Body: Segoe UI 10. Borders are dotted across all table columns, including Notes & When to Invoice.")
