@@ -46,7 +46,7 @@ def _read_any_table(uploaded_file, preferred_sheet_name=None):
 # Transformation Logic
 # ---------------------------
 
-ID_COLS = ['Random ID', 'Name', 'Provider Name', 'Phone', 'Email']
+ID_COLS = ['Random ID', 'Provider Name', 'Name', 'Phone', 'Email']
 
 def _is_event_label(x):
     """
@@ -83,7 +83,7 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     """
     if form_df.shape[0] < 2:
         # Expect at least one header row (subheaders) + one data row
-        return pd.DataFrame(columns=['Random ID','Name','Provider Name','Phone','Email','Type','Event Date (if applicable)','Product','Cost'])
+        return pd.DataFrame(columns=['Random ID','Provider Name', 'Name','Phone','Email','Type','Event Date (if applicable)','Product','Cost'])
 
     # Row 0 is the subheader row; respondents start from row 1.
     subheaders = form_df.iloc[0]
@@ -156,7 +156,7 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
             out[c] = None
 
     # Arrange final columns
-    out = out[['Random ID','Provider Name','Phone','Email','Type','Event Date (if applicable)','Product']]
+    out = out[['Random ID','Provider Name','Name','Phone','Email','Type','Event Date (if applicable)','Product']]
 
     # Cost join on exact (Type, Product) after trimming
     def _norm(s):
