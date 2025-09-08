@@ -1,17 +1,18 @@
-
-
 import re
 import os
 from io import BytesIO
 import zipfile
 import pandas as pd
 import streamlit as st
+
 # Excel handling / styling
 from openpyxl import load_workbook
 from openpyxl.styles import Border, Side, Font
+
 # ---------------------------
 # Utilities: robust readers
 # ---------------------------
+
 def _read_any_table(uploaded_file, preferred_sheet_name=None):
     """
     Read CSV or Excel into a DataFrame.
@@ -41,7 +42,9 @@ def _read_any_table(uploaded_file, preferred_sheet_name=None):
 # ---------------------------
 # Transformation Logic
 # ---------------------------
+
 ID_COLS = ['Random ID', 'Provider Name', 'Name', 'Phone', 'Email']
+
 def _is_event_label(x):
     """Heuristic: is a subheader a date/month/quarter string?"""
     if pd.isna(x):
@@ -55,6 +58,7 @@ def _is_event_label(x):
     if re.search(r'\d', s):  # e.g., "4th February - Midlands"
         return True
     return False
+
 def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     """
     Convert Zoho's wide export to normalized rows and join Cost from MOF sheet.
@@ -65,8 +69,10 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
             'Random ID','Provider Name','Name','Phone','Email',
             'Type','Event Date (if applicable)','Product','Cost'
         ])
+
     subheaders = form_df.iloc[0]
     data_rows = form_df.iloc[1:].reset_index(drop=True)
+
     records = []
     for ridx, row in data_rows.iterrows():
         current_type = None
@@ -77,8 +83,10 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
                     current_type = col
             if pd.isna(val):
                 continue
+
             sub = subheaders.iloc[j] if j < len(subheaders) else None
             text_val = str(val).strip()
+
             if not str(col).startswith('Unnamed'):
                 # Named column: apply Option rule too (bug fix)
                 if col in ID_COLS or col in ['Added Time', 'Referrer Name', 'Task Owner']:
@@ -109,12 +117,16 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
                     continue
                 records.append({'_ridx': ridx, 'Type': current_type,
                                 'Event Date (if applicable)': evt, 'Product': prod})
+
     out = pd.DataFrame.from_records(records)
+
     # Attach ID columns
     for c in ID_COLS:
         out[c] = out['_ridx'].map(data_rows[c]) if c in data_rows.columns else None
+
     out = out[['Random ID','Provider Name','Name','Phone','Email',
                'Type','Event Date (if applicable)','Product']]
+
     # Join Cost
     def _norm(s): return None if pd.isna(s) else str(s).strip()
     if not set(['Type','Product','Cost']).issubset(costs_df.columns):
@@ -124,22 +136,26 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     costs2['Product_norm'] = costs2['Product'].apply(_norm)
     out['Type_norm'] = out['Type'].apply(_norm)
     out['Product_norm'] = out['Product'].apply(_norm)
+
     out = out.merge(
         costs2[['Type_norm','Product_norm','Cost']],
         on=['Type_norm','Product_norm'], how='left'
     ).drop(columns=['Type_norm','Product_norm'])
+
     out = out.sort_values(['Random ID','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
     return out
 
 # ---------------------------
 # Template population
 # ---------------------------
+
 def _sanitize_name(name: str) -> str:
     """Remove commas and extra whitespace."""
     if pd.isna(name):
         return ""
     s = str(name).replace(",", " ")
     return re.sub(r"\s+", " ", s).strip()
+
 def _find_table_header_row(ws):
     """
     Find a row containing 'Type' and 'Product' (side-by-side), and also
@@ -171,6 +187,7 @@ def _find_table_header_row(ws):
                             hmap[key] = c2
                         return r, c, hmap
     raise RuntimeError("Could not find the table header row with 'Type' and 'Product'.")
+
 def _get_col(hmap, key, aliases=()):
     """Find a column by exact header or any alias (case-insensitive)."""
     # try exact
@@ -186,6 +203,7 @@ def _get_col(hmap, key, aliases=()):
         if a.lower() in lowered:
             return lowered[a.lower()]
     return None
+
 def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame) -> BytesIO:
     """
     Returns a ZIP containing one populated template per Provider.
@@ -197,6 +215,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
     - Table rows filled and styled; Total = Qty * Charge.
     - Borders apply across through 'Notes' and 'When to Invoice' if those headers exist.
     - Headers styled: Segoe UI, 12, bold, white font.
+    - Charge & Total cells formatted as Accounting (GBP).
     """
     # Optional F2F mapping from cost sheet
     f2f_map = {}
@@ -205,30 +224,39 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
         tmp = costs_df[['Product','F2F or Online?']].copy()
         tmp['Product_norm'] = tmp['Product'].apply(_n)
         f2f_map = dict(zip(tmp['Product_norm'], tmp['F2F or Online?']))
+
     groups = cleaned.groupby('Provider Name', dropna=False)
+
     zip_buf = BytesIO()
     # dotted borders per request
     dotted = Side(style='dotted')
     border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
     font10 = Font(name="Segoe UI", size=10)
     header_font = Font(name="Segoe UI", size=12, bold=True, color="FFFFFF")
+    # Excel Accounting (GBP) format
+    ACC_FMT = '_-£* #,##0.00_-;_-£* -#,##0.00_-;_-£* "-"??_-;_-@_-'
+
     with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for provider, dfp in groups:
             wb = load_workbook(BytesIO(template_bytes))
             ws = wb.active  # first sheet
+
             # Fixed cells
             provider_val = "" if pd.isna(provider) else str(provider)
             name_val = _sanitize_name(dfp['Name'].iloc[0] if 'Name' in dfp.columns and len(dfp) > 0 else "")
             phone_val = "" if 'Phone' not in dfp.columns else ("" if pd.isna(dfp['Phone'].iloc[0]) else str(dfp['Phone'].iloc[0]))
             email_val = "" if 'Email' not in dfp.columns else ("" if pd.isna(dfp['Email'].iloc[0]) else str(dfp['Email'].iloc[0]))
+
             ws["B7"]  = provider_val
             ws["B9"]  = name_val
             ws["G9"]  = phone_val
             ws["I9"]  = email_val
             ws["B11"] = email_val
             ws["I15"] = email_val
+
             # Find table and headers
             hdr_row, hdr_col, hmap = _find_table_header_row(ws)
+
             # Explicit, safe mapping only to the intended columns
             c_Type   = _get_col(hmap, "Type")
             c_Prod   = _get_col(hmap, "Product")
@@ -240,16 +268,20 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             c_Total  = _get_col(hmap, "Total")
             c_Notes  = _get_col(hmap, "Notes")
             c_When   = _get_col(hmap, "When to Invoice", aliases=("When To Invoice","When-to-Invoice"))
+
             # Header styling (font only; template handles fill color)
             cols_for_header = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
             for c in cols_for_header:
                 ws.cell(hdr_row, c).font = header_font
+
             start_row = hdr_row + 1
             n = len(dfp)
+
             # Insert rows to match number of items
             if n > 1:
                 ws.insert_rows(start_row + 1, amount=n - 1)
-            # Write only to mapped columns (prevents accidental writes e.g. to Q/R)
+
+            # Write only to mapped columns
             for i, (_, r) in enumerate(dfp.iterrows()):
                 rr = start_row + i
                 typ   = r.get("Type", "")
@@ -259,20 +291,28 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 charge = r.get("Cost", None)
                 prod_key = None if pd.isna(prod) else str(prod).strip()
                 f2f_val = f2f_map.get(prod_key, "")
+
                 if c_Type:   ws.cell(rr, c_Type,   typ)
                 if c_Prod:   ws.cell(rr, c_Prod,   prod)
                 if c_Month:  ws.cell(rr, c_Month,  month)
                 if c_Date:   ws.cell(rr, c_Date,   None)         # blank
                 if c_F2F:    ws.cell(rr, c_F2F,    f2f_val)
                 if c_Qty:    ws.cell(rr, c_Qty,    qty)
-                if c_Charge: ws.cell(rr, c_Charge, charge)
-                # Total = Qty * Charge
+
+                # Charge (numeric), formatted as Accounting
+                if c_Charge:
+                    ws.cell(rr, c_Charge, charge)
+                    ws.cell(rr, c_Charge).number_format = ACC_FMT
+
+                # Total = Qty * Charge (numeric), formatted as Accounting
                 if c_Total:
                     try:
                         total_val = (qty or 0) * (float(charge) if charge not in [None, ""] else 0.0)
                     except Exception:
                         total_val = None
                     ws.cell(rr, c_Total, total_val)
+                    ws.cell(rr, c_Total).number_format = ACC_FMT
+
             # Borders + body font (Segoe UI 10) over full table width INCLUDING Notes / When to Invoice
             last_row = start_row + max(n - 1, 0)
             table_cols = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
@@ -280,35 +320,42 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 table_cols = [hdr_col, hdr_col+1]  # minimal safety
             last_col = max(table_cols)
             first_col = min(table_cols)
-            # Header row styling also gets borders & font 10? You asked size 12 for header;
-            # we'll keep header font at 12 and apply borders; body rows get size 10.
+
+            # Header borders
             for c in range(first_col, last_col + 1):
                 cell = ws.cell(hdr_row, c)
-                cell.border = border  # border around header too
+                cell.border = border
+
+            # Body borders + font
             for r in range(start_row, last_row + 1):
                 for c in range(first_col, last_col + 1):
                     cell = ws.cell(r, c)
                     cell.border = border
                     cell.font = font10
+
             # Save workbook into ZIP under templates/
             out_bytes = BytesIO()
             wb.save(out_bytes)
             out_bytes.seek(0)
             safe_provider = re.sub(r'[^A-Za-z0-9 _.-]+', '_', provider_val or "Unknown_Provider")
             zf.writestr(f"templates/{safe_provider}.xlsx", out_bytes.getvalue())
+
     zip_buf.seek(0)
     return zip_buf
 
 # ---------------------------
 # Streamlit App
 # ---------------------------
+
 st.set_page_config(page_title="Zoho Forms → Cleaned Output + Templates", layout="wide")
 st.title("Zoho Forms → Cleaned Output + Populated Templates")
+
 st.markdown("""
 Upload your files and click **Submit** to get a ZIP containing:
 - **templates/** → one populated workbook **per Provider Name**  
 - **data/cleaned_output.xlsx** → your single cleaned dataset
 """)
+
 c1, c2, c3 = st.columns(3)
 with c1:
     form_file = st.file_uploader("Zoho Forms export (.csv/.xlsx/.xls)", type=["csv","xlsx","xls","txt"])
@@ -316,6 +363,7 @@ with c2:
     cost_file = st.file_uploader("MOF Cost Sheet (.csv/.xlsx/.xls)", type=["csv","xlsx","xls","txt"])
 with c3:
     template_file = st.file_uploader("Template (Excel, optional)", type=["xlsx","xls"])
+
 if st.button("Submit"):
     if not form_file or not cost_file:
         st.error("Please upload both the Zoho Forms export and the MOF Cost Sheet.")
@@ -332,12 +380,14 @@ if st.button("Submit"):
             except Exception as e:
                 st.exception(RuntimeError(f"Failed to read the MOF Cost Sheet: {e}"))
                 st.stop()
+
             # Transform
             try:
                 cleaned = transform(form_df, costs_df)
             except Exception as e:
                 st.exception(e)
                 st.stop()
+
             # Build results.zip with templates (if provided) + data/cleaned_output.xlsx
             zip_buf = BytesIO()
             with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -345,6 +395,7 @@ if st.button("Submit"):
                 cleaned_bytes = BytesIO()
                 cleaned.to_excel(cleaned_bytes, index=False)
                 zf.writestr("data/cleaned_output.xlsx", cleaned_bytes.getvalue())
+
                 # Optional: templates
                 if template_file is not None:
                     try:
@@ -356,25 +407,22 @@ if st.button("Submit"):
                                 zf.writestr(info.filename, tplzf.read(info.filename))
                     except Exception as e:
                         st.exception(RuntimeError(f"Template population failed: {e}"))
+
             zip_buf.seek(0)
+
             # Summary & download
             st.success(f"Done. Cleaned {len(cleaned)} rows.")
             st.dataframe(cleaned.head(100), use_container_width=True)
             missing_costs = cleaned['Cost'].isna().sum()
             if missing_costs > 0:
                 st.warning(f"{missing_costs} row(s) have no Cost match. Ensure (Type, Product) exist in the MOF Cost Sheet.")
-                with st.expander("Preview rows missing Cost"):
-                    st.dataframe(
-                        cleaned[cleaned['Cost'].isna()][
-                            ['Provider Name','Type','Event Date (if applicable)','Product']
-                        ].head(500)
-                    )
+
             st.download_button(
                 "Download results.zip",
                 data=zip_buf.getvalue(),
                 file_name="results.zip",
                 mime="application/zip"
             )
-st.markdown("---")
-st.caption("Headers: Segoe UI 12 bold white. Body: Segoe UI 10. Borders are dotted across all table columns, including Notes & When to Invoice.")
 
+st.markdown("---")
+st.caption("Headers: Segoe UI 12 bold white. Body: Segoe UI 10. Borders dotted across all table columns (including Notes & When to Invoice). Charge & Total in Accounting format (GBP).")
