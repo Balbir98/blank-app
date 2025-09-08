@@ -6,9 +6,9 @@ import zipfile
 import pandas as pd
 import streamlit as st
 
-# Excel handling
+# Excel handling / styling
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
+from openpyxl.styles import Border, Side, Font
 
 # ---------------------------
 # Utilities: robust readers
@@ -17,9 +17,8 @@ from openpyxl.utils import get_column_letter
 def _read_any_table(uploaded_file, preferred_sheet_name=None):
     """
     Read CSV or Excel into a DataFrame.
-    - If file extension is .csv/.txt → try read_csv with sniffed delimiter (python engine, sep=None)
-      and UTF-8 fallback to latin-1.
-    - If Excel (.xlsx/.xls) → try preferred sheet name, then first sheet.
+    - If file extension is .csv/.txt → try read_csv (python engine, sep=None) with UTF-8 then latin-1 fallback.
+    - If Excel (.xlsx/.xls) → try preferred sheet name, else first sheet.
     """
     name = uploaded_file.name.lower()
     ext = os.path.splitext(name)[1]
@@ -51,38 +50,23 @@ def _read_any_table(uploaded_file, preferred_sheet_name=None):
 ID_COLS = ['Random ID', 'Provider Name', 'Name', 'Phone', 'Email']
 
 def _is_event_label(x):
-    """
-    Decide if a subheader cell is an event/date-like label (month, quarter, or date string).
-    """
+    """Heuristic: is a subheader a date/month/quarter string?"""
     if pd.isna(x):
         return False
     s = str(x).strip()
-    # Month-like (prefix check, tolerant of typos like "Febraury")
     months3 = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec']
     if any(s.lower().startswith(m) for m in months3):
         return True
-    # Quarters / cadence
     if s in ['Q1','Q2','Q3','Q4','Monthly','Quarterly']:
         return True
-    # Has digits (e.g., "4th February - Midlands", "17th June - Scotland")
-    if re.search(r'\d', s):
+    if re.search(r'\d', s):  # e.g., "4th February - Midlands"
         return True
     return False
 
 def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform a Zoho Forms export (wide sheet with section headers and subheaders in row 0)
-    into the normalized "Desired Output" long format, and join "Cost" from a cost sheet.
-
-    Assumptions:
-    - Row 0 contains subheaders (months, event dates, or product labels) for the block's columns.
-    - A "block" starts at a named column (not starting with "Unnamed"), followed by 0+ "Unnamed:" columns.
-    - For unnamed columns:
-        * If the subheader looks like a date/month/quarter, that becomes Event Date and the cell value is Product.
-        * If the cell value contains "option" (e.g., "NTE Option"), the subheader text becomes the Product.
-        * Otherwise the subheader text itself is the Product (Event Date blank).
-    - For *named* columns, the same "option" rule now applies (bug fix).
-    - Costs are joined on exact match of (Type, Product) after string trimming.
+    Convert Zoho's wide export to normalized rows and join Cost from MOF sheet.
+    - “Option” rule is applied for both named and unnamed columns.
     """
     if form_df.shape[0] < 2:
         return pd.DataFrame(columns=[
@@ -90,7 +74,6 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
             'Type','Event Date (if applicable)','Product','Cost'
         ])
 
-    # Row 0 is the subheader row; respondents start from row 1.
     subheaders = form_df.iloc[0]
     data_rows = form_df.iloc[1:].reset_index(drop=True)
 
@@ -99,8 +82,6 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
         current_type = None
         for j, col in enumerate(form_df.columns):
             val = row[col]
-
-            # Track the current Type on named (non-Unnamed) columns that are not identity/admin columns
             if not str(col).startswith('Unnamed'):
                 if col not in ID_COLS and col not in ['Added Time', 'Referrer Name', 'Task Owner']:
                     current_type = col
@@ -112,30 +93,23 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
             text_val = str(val).strip()
 
             if not str(col).startswith('Unnamed'):
-                # Named column: apply "Option" rule here too (bug fix).
+                # Named column: apply Option rule too (bug fix)
                 if col in ID_COLS or col in ['Added Time', 'Referrer Name', 'Task Owner']:
                     continue
-
                 if re.search(r'\boption(s)?\b', text_val, flags=re.I) and not pd.isna(sub):
-                    # If the cell is "Option"/"... Option", use subheader text as Product
                     prod = str(sub).strip()
-                    evt = None if not _is_event_label(sub) else str(sub).strip()  # usually sub is product here
-                    # If sub looks like date (rare for an 'Option' case), treat it as event and keep prod=text_val
+                    evt = None if not _is_event_label(sub) else str(sub).strip()
                     if _is_event_label(sub):
                         prod = text_val
                 else:
                     prod = text_val
                     evt = str(sub).strip() if _is_event_label(sub) else None
 
-                records.append({
-                    '_ridx': ridx,
-                    'Type': current_type,
-                    'Event Date (if applicable)': evt,
-                    'Product': prod
-                })
+                records.append({'_ridx': ridx, 'Type': current_type,
+                                'Event Date (if applicable)': evt, 'Product': prod})
 
             else:
-                # Unnamed column in the current block (existing logic)
+                # Unnamed column path
                 if re.search(r'\boption(s)?\b', text_val, flags=re.I):
                     prod = str(sub).strip() if not pd.isna(sub) else text_val
                     evt = None
@@ -150,47 +124,34 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
                 if current_type is None:
                     continue
 
-                records.append({
-                    '_ridx': ridx,
-                    'Type': current_type,
-                    'Event Date (if applicable)': evt,
-                    'Product': prod
-                })
+                records.append({'_ridx': ridx, 'Type': current_type,
+                                'Event Date (if applicable)': evt, 'Product': prod})
 
     out = pd.DataFrame.from_records(records)
 
-    # Attach identity columns for each record from its source row
+    # Attach ID columns
     for c in ID_COLS:
-        if c in data_rows.columns:
-            out[c] = out['_ridx'].map(data_rows[c])
-        else:
-            out[c] = None
+        out[c] = out['_ridx'].map(data_rows[c]) if c in data_rows.columns else None
 
-    # Arrange final columns
-    out = out[['Random ID','Provider Name','Name','Phone','Email','Type','Event Date (if applicable)','Product']]
+    out = out[['Random ID','Provider Name','Name','Phone','Email',
+               'Type','Event Date (if applicable)','Product']]
 
-    # Cost join on exact (Type, Product) after trimming
-    def _norm(s):
-        return None if pd.isna(s) else str(s).strip()
-
-    # Costs sheet must have columns: Type, Product, Cost (and may have 'F2F or Online?')
-    costs_df2 = costs_df.copy()
-    if not set(['Type','Product','Cost']).issubset(set(costs_df2.columns)):
+    # Join Cost
+    def _norm(s): return None if pd.isna(s) else str(s).strip()
+    if not set(['Type','Product','Cost']).issubset(costs_df.columns):
         raise ValueError("Cost sheet must contain columns: Type, Product, Cost")
 
-    costs_df2['Type_norm'] = costs_df2['Type'].apply(_norm)
-    costs_df2['Product_norm'] = costs_df2['Product'].apply(_norm)
+    costs2 = costs_df.copy()
+    costs2['Type_norm'] = costs2['Type'].apply(_norm)
+    costs2['Product_norm'] = costs2['Product'].apply(_norm)
     out['Type_norm'] = out['Type'].apply(_norm)
     out['Product_norm'] = out['Product'].apply(_norm)
 
-    # Merge Cost
     out = out.merge(
-        costs_df2[['Type_norm','Product_norm','Cost']],
-        on=['Type_norm','Product_norm'],
-        how='left'
+        costs2[['Type_norm','Product_norm','Cost']],
+        on=['Type_norm','Product_norm'], how='left'
     ).drop(columns=['Type_norm','Product_norm'])
 
-    # Optional: tidy sort
     out = out.sort_values(['Random ID','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
     return out
 
@@ -200,69 +161,80 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------
 
 def _sanitize_name(name: str) -> str:
-    """Remove commas and excessive spaces for 'Name' going into Main contact."""
+    """Remove commas and extra whitespace."""
     if pd.isna(name):
         return ""
     s = str(name).replace(",", " ")
     return re.sub(r"\s+", " ", s).strip()
 
-def _find_table_header_row(ws, header_candidates=("Type","Product","Month","Date")):
+def _find_table_header_row(ws):
     """
-    Find the row index (1-based) where the first two headers match 'Type' and 'Product',
-    and 'Month' and 'Date' appear to the right somewhere on the same row.
-    Returns the header row number, first header column index, and header map {header: col_idx}.
+    Find a row containing Type | Product and also Month and Date headers somewhere to the right.
+    Returns (header_row_index, header_col_index, header_map).
     """
     max_row = min(ws.max_row, 200)
-    max_col = min(ws.max_column, 40)
-
+    max_col = min(ws.max_column, 60)
     for r in range(1, max_row + 1):
-        # Collect row values
         row_vals = [ws.cell(r, c).value for c in range(1, max_col + 1)]
-        # try to locate "Type"
-        for c in range(1, max_col + 1):
-            if (str(row_vals[c-1]).strip().lower() == "type" if row_vals[c-1] is not None else False):
-                # Expect next header is Product
-                if c + 1 <= max_col and (str(row_vals[c]).strip().lower() == "product" if row_vals[c] is not None else False):
-                    # Look for Month and Date somewhere to the right
-                    month_ok = any((str(v).strip().lower() == "month") if v is not None else False for v in row_vals[c:])
-                    date_ok = any((str(v).strip().lower() == "date") if v is not None else False for v in row_vals[c:])
-                    if month_ok and date_ok:
-                        # Build header map for all visible headers on this row
+        for c in range(1, max_col):
+            v = row_vals[c-1]
+            if v is not None and str(v).strip().lower() == "type":
+                nextv = row_vals[c] if c < max_col else None
+                if nextv is not None and str(nextv).strip().lower() == "product":
+                    # scan for Month and Date on same row
+                    rest = row_vals[c-1:]
+                    if any((rv is not None and str(rv).strip().lower()=="month") for rv in rest) and \
+                       any((rv is not None and str(rv).strip().lower()=="date") for rv in rest):
+                        # build header map
                         hmap = {}
-                        for c2 in range(c, max_col + 1):
-                            v = ws.cell(r, c2).value
-                            if v is None:
+                        for c2 in range(1, max_col + 1):
+                            v2 = ws.cell(r, c2).value
+                            if v2 is None:
                                 continue
-                            key = str(v).strip()
+                            key = str(v2).strip()
                             hmap[key] = c2
                         return r, c, hmap
-    raise RuntimeError("Could not find the table header row with columns like Type | Product | Month | Date ...")
+    raise RuntimeError("Could not find the table header row with 'Type' and 'Product'.")
+
+def _col(hmap, key, *aliases, default=None):
+    keys = (key,)+aliases
+    for k in keys:
+        if k in hmap:
+            return hmap[k]
+    return default
 
 def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame) -> BytesIO:
     """
-    Creates a ZIP of one populated template per provider.
-    - Fills fixed cells
-    - Inserts rows for each product line under the detected table
-    - Preserves template formulas by using openpyxl insert_rows which shifts cells down
+    Returns a ZIP containing one populated template per Provider.
+    - Fixed cells:
+        B7 = Provider Name
+        B9 = Main contact (Name sans comma)
+        G9 = Phone
+        I9 = Email
+        B11 = Email
+        I15 = Email
+    - Table rows filled from 'cleaned' and styled (dotted borders, Segoe UI 10).
+    - 'Total' column = Qty * Charge (value).
     """
-    # Optional lookup for F2F/Online from costs sheet (matched by Product)
+    # Optional F2F mapping from cost sheet
     f2f_map = {}
     if 'F2F or Online?' in costs_df.columns:
-        # normalize product string
         def _n(s): return None if pd.isna(s) else str(s).strip()
         tmp = costs_df[['Product','F2F or Online?']].copy()
         tmp['Product_norm'] = tmp['Product'].apply(_n)
         f2f_map = dict(zip(tmp['Product_norm'], tmp['F2F or Online?']))
 
-    # Group cleaned data by Provider Name
     groups = cleaned.groupby('Provider Name', dropna=False)
 
     zip_buf = BytesIO()
+    dashed = Side(style='dotted')  # dotted/dashed per request; using 'dotted'
+    border = Border(top=dashed, bottom=dashed, left=dashed, right=dashed)
+    font10 = Font(name="Segoe UI", size=10)
+
     with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for provider, dfp in groups:
-            # Load template fresh each time
             wb = load_workbook(BytesIO(template_bytes))
-            ws = wb.active  # assume first sheet
+            ws = wb.active  # first sheet
 
             # Fixed cells
             provider_val = "" if pd.isna(provider) else str(provider)
@@ -270,79 +242,82 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             phone_val = "" if 'Phone' not in dfp.columns else ("" if pd.isna(dfp['Phone'].iloc[0]) else str(dfp['Phone'].iloc[0]))
             email_val = "" if 'Email' not in dfp.columns else ("" if pd.isna(dfp['Email'].iloc[0]) else str(dfp['Email'].iloc[0]))
 
-            # Cells: B7 (Provider), B9 (Main contact), G9 (Phone), I9 (Email),
-            # and email again at B12, I12
-            ws["B7"] = provider_val
-            ws["B9"] = name_val
-            ws["G9"] = phone_val
-            ws["I9"] = email_val
-            ws["B12"] = email_val
-            ws["I12"] = email_val
+            ws["B7"]  = provider_val
+            ws["B9"]  = name_val
+            ws["G9"]  = phone_val
+            ws["I9"]  = email_val
+            ws["B11"] = email_val
+            ws["I15"] = email_val
 
-            # Locate table header row and columns
+            # Find table
             hdr_row, hdr_col, hmap = _find_table_header_row(ws)
 
-            start_data_row = hdr_row + 1
-            n_lines = len(dfp)
+            # Determine columns
+            c_Type   = _col(hmap, "Type")
+            c_Prod   = _col(hmap, "Product")
+            c_Month  = _col(hmap, "Month", "Event Month", "Month of")
+            c_Date   = _col(hmap, "Date")
+            c_F2F    = _col(hmap, "F2F or Online?", "F2F or Online", "F2F/Online")
+            c_Qty    = _col(hmap, "Qty", "Quantity")
+            c_Charge = _col(hmap, "Charge", "Cost", "Price")
+            c_Total  = _col(hmap, "Total")
 
-            # Ensure exactly n_lines rows available under header.
-            # If the template has one sample row, we need to insert (n_lines - 1) rows.
-            if n_lines > 1:
-                ws.insert_rows(start_data_row + 1, amount=n_lines - 1)
+            start_row = hdr_row + 1
+            n = len(dfp)
 
-            # Column resolution helpers
-            def col_of(header_text, default=None):
-                # Accept variations for "F2F or Online?"
-                aliases = {
-                    "F2F or Online?": ["F2F or Online?","F2F/Online","F2F or Online"],
-                    "Qty": ["Qty","Quantity"],
-                    "Charge": ["Charge","Cost","Price"],
-                    "Month": ["Month","Event Month","Month of"],
-                }
-                keys = [header_text] + aliases.get(header_text, [])
-                for k in keys:
-                    if k in hmap: 
-                        return hmap[k]
-                return default
+            # Insert rows so we have exactly n data rows beneath header
+            if n > 1:
+                ws.insert_rows(start_row + 1, amount=n - 1)
 
-            col_Type   = col_of("Type")
-            col_Prod   = col_of("Product")
-            col_Month  = col_of("Month")
-            col_Date   = col_of("Date")
-            col_F2F    = col_of("F2F or Online?")
-            col_Qty    = col_of("Qty")
-            col_Charge = col_of("Charge")
-
-            # Write rows
+            # Fill data rows
             for i, (_, r) in enumerate(dfp.iterrows()):
-                rr = start_data_row + i
-                # Values
-                typ = r.get("Type", "")
-                prod = r.get("Product", "")
+                rr = start_row + i
+                typ   = r.get("Type", "")
+                prod  = r.get("Product", "")
                 month = r.get("Event Date (if applicable)", "")
-                qty = 1
-                charge = r.get("Cost", "")
+                qty   = 1
+                charge = r.get("Cost", None)
 
-                # F2F lookup by Product (exact, trimmed)
+                # F2F by product exact match
                 prod_key = None if pd.isna(prod) else str(prod).strip()
                 f2f_val = f2f_map.get(prod_key, "")
 
-                if col_Type:   ws.cell(rr, col_Type,   typ)
-                if col_Prod:   ws.cell(rr, col_Prod,   prod)
-                if col_Month:  ws.cell(rr, col_Month,  month)
-                if col_Date:   ws.cell(rr, col_Date,   None)  # left blank
-                if col_F2F:    ws.cell(rr, col_F2F,    f2f_val)
-                if col_Qty:    ws.cell(rr, col_Qty,    qty)
-                if col_Charge: ws.cell(rr, col_Charge, charge)
+                if c_Type:   ws.cell(rr, c_Type,   typ)
+                if c_Prod:   ws.cell(rr, c_Prod,   prod)
+                if c_Month:  ws.cell(rr, c_Month,  month)
+                if c_Date:   ws.cell(rr, c_Date,   None)
+                if c_F2F:    ws.cell(rr, c_F2F,    f2f_val)
+                if c_Qty:    ws.cell(rr, c_Qty,    qty)
+                if c_Charge: ws.cell(rr, c_Charge, charge)
 
-            # Save one workbook per provider into ZIP
+                # Total = Qty * Charge (value)
+                if c_Total:
+                    try:
+                        total_val = (qty or 0) * (float(charge) if charge not in [None, ""] else 0.0)
+                    except Exception:
+                        total_val = None
+                    ws.cell(rr, c_Total, total_val)
+
+            # Style the written table block (header + data)
+            last_row = start_row + max(n - 1, 0)
+            # Choose a conservative last column = max of known important columns present
+            cols_present = [c for c in [c_Type, c_Prod, c_Month, c_Date, c_F2F, c_Qty, c_Charge, c_Total] if c]
+            if not cols_present:
+                cols_present = [hdr_col, hdr_col+1]  # fallback
+            last_col = max(cols_present)
+
+            for r in range(hdr_row, last_row + 1):
+                for c in range(hdr_col, last_col + 1):
+                    cell = ws.cell(r, c)
+                    cell.border = border
+                    cell.font = font10
+
+            # Save to ZIP under templates/
             out_bytes = BytesIO()
             wb.save(out_bytes)
             out_bytes.seek(0)
-
-            # Safe filename
             safe_provider = re.sub(r'[^A-Za-z0-9 _.-]+', '_', provider_val or "Unknown_Provider")
-            zf.writestr(f"{safe_provider}.xlsx", out_bytes.getvalue())
+            zf.writestr(f"templates/{safe_provider}.xlsx", out_bytes.getvalue())
 
     zip_buf.seek(0)
     return zip_buf
@@ -352,31 +327,29 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
 # Streamlit App
 # ---------------------------
 
-st.set_page_config(page_title="Zoho Forms Cleaner + Template Populator", layout="wide")
+st.set_page_config(page_title="Zoho Forms → Cleaned Output + Templates", layout="wide")
 st.title("Zoho Forms → Cleaned Output + Populated Templates")
 
 st.markdown("""
-**How it works**
-1. Upload your raw Zoho Forms export (**CSV** or Excel).
-2. Upload the MOF Cost Sheet (**CSV** or Excel) with columns: **Type, Product, Cost** (optionally **F2F or Online?**).
-3. (Optional) Upload your **template** (Excel).  
-4. Click **Transform** to get the normalized output + costs.  
-   - If a template is provided, you'll also get a **ZIP** with one populated workbook **per Provider Name**.
+Upload your files and click **Submit** to get a ZIP containing:
+- **templates/** → one populated workbook **per Provider Name**  
+- **data/cleaned_output.xlsx** → your single cleaned dataset
 """)
 
 c1, c2, c3 = st.columns(3)
 with c1:
-    form_file = st.file_uploader("1) Upload Zoho Forms export (.csv/.xlsx/.xls)", type=["csv","xlsx","xls","txt"])
+    form_file = st.file_uploader("Zoho Forms export (.csv/.xlsx/.xls)", type=["csv","xlsx","xls","txt"])
 with c2:
-    cost_file = st.file_uploader("2) Upload MOF Cost Sheet (.csv/.xlsx/.xls)", type=["csv","xlsx","xls","txt"])
+    cost_file = st.file_uploader("MOF Cost Sheet (.csv/.xlsx/.xls)", type=["csv","xlsx","xls","txt"])
 with c3:
-    template_file = st.file_uploader("3) Upload Template (optional, Excel)", type=["xlsx","xls"])
+    template_file = st.file_uploader("Template (Excel, optional)", type=["xlsx","xls"])
 
-if st.button("Transform to Desired Output"):
+if st.button("Submit"):
     if not form_file or not cost_file:
         st.error("Please upload both the Zoho Forms export and the MOF Cost Sheet.")
     else:
-        with st.spinner("Transforming..."):
+        with st.spinner("Processing..."):
+            # Read inputs
             try:
                 form_df = _read_any_table(form_file, preferred_sheet_name="Form")
             except Exception as e:
@@ -389,17 +362,41 @@ if st.button("Transform to Desired Output"):
                 st.exception(RuntimeError(f"Failed to read the MOF Cost Sheet: {e}"))
                 st.stop()
 
-            # Clean the data
+            # Transform
             try:
                 cleaned = transform(form_df, costs_df)
             except Exception as e:
                 st.exception(e)
                 st.stop()
 
-            st.success(f"Cleaned {len(cleaned)} rows.")
-            st.dataframe(cleaned, use_container_width=True)
+            # Build results.zip with templates (if provided) + data/cleaned_output.xlsx
+            zip_buf = BytesIO()
+            with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                # Add cleaned_output.xlsx
+                cleaned_bytes = BytesIO()
+                cleaned.to_excel(cleaned_bytes, index=False)
+                zf.writestr("data/cleaned_output.xlsx", cleaned_bytes.getvalue())
 
-            # Quality signal on unmatched costs
+                # Optional: templates
+                if template_file is not None:
+                    try:
+                        template_bytes = template_file.read()
+                        tpl_zip = _populate_template_bytes(template_bytes, cleaned, costs_df)
+                        # Unpack tpl_zip into templates/ folder in our main ZIP
+                        with zipfile.ZipFile(tpl_zip, 'r') as tplzf:
+                            for info in tplzf.infolist():
+                                # info.filename already starts with "templates/"
+                                zf.writestr(info.filename, tplzf.read(info.filename))
+                    except Exception as e:
+                        st.exception(RuntimeError(f"Template population failed: {e}"))
+
+            zip_buf.seek(0)
+
+            # Summary & download
+            st.success(f"Done. Cleaned {len(cleaned)} rows.")
+            # Show a preview
+            st.dataframe(cleaned.head(100), use_container_width=True)
+
             missing_costs = cleaned['Cost'].isna().sum()
             if missing_costs > 0:
                 st.warning(f"{missing_costs} row(s) have no Cost match. Ensure (Type, Product) exist in the MOF Cost Sheet.")
@@ -410,30 +407,12 @@ if st.button("Transform to Desired Output"):
                         ].head(500)
                     )
 
-            # Download cleaned output
-            cleaned_buf = BytesIO()
-            cleaned.to_excel(cleaned_buf, index=False)
             st.download_button(
-                "Download cleaned_output.xlsx",
-                data=cleaned_buf.getvalue(),
-                file_name="cleaned_output.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                "Download results.zip",
+                data=zip_buf.getvalue(),
+                file_name="results.zip",
+                mime="application/zip"
             )
 
-            # If template uploaded → also build ZIP of populated templates
-            if template_file is not None:
-                try:
-                    template_bytes = template_file.read()
-                    zip_buf = _populate_template_bytes(template_bytes, cleaned, costs_df)
-                except Exception as e:
-                    st.exception(RuntimeError(f"Template population failed: {e}"))
-                else:
-                    st.download_button(
-                        "Download populated_templates.zip",
-                        data=zip_buf.getvalue(),
-                        file_name="populated_templates.zip",
-                        mime="application/zip"
-                    )
-
 st.markdown("---")
-st.caption("If you want custom header cell locations, alternate sheet names, or fuzzy product-to-cost matching, I can add options above.")
+st.caption("Borders are dotted and table font is Segoe UI 10. Total is computed as Qty*Charge. Adjustments welcome!")
