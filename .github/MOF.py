@@ -9,6 +9,7 @@ import streamlit as st
 # Excel handling / styling
 from openpyxl import load_workbook
 from openpyxl.styles import Border, Side, Font
+from openpyxl.utils import get_column_letter
 
 # ---------------------------
 # Utilities: robust readers
@@ -181,12 +182,10 @@ def _find_table_header_row(ws):
             if v is not None and str(v).strip().lower() == "type":
                 nxt = row_vals[c] if c < max_col else None
                 if nxt is not None and str(nxt).strip().lower() == "product":
-                    # Check Month & Date exist to the right in this row
                     rest = row_vals[c-1:]
                     month_ok = any((rv is not None and str(rv).strip().lower()=="month") for rv in rest)
                     date_ok  = any((rv is not None and str(rv).strip().lower()=="date")  for rv in rest)
                     if month_ok and date_ok:
-                        # Build a precise header map: only non-empty cells on this header row
                         hmap = {}
                         for c2 in range(1, max_col + 1):
                             v2 = ws.cell(r, c2).value
@@ -199,10 +198,8 @@ def _find_table_header_row(ws):
 
 def _get_col(hmap, key, aliases=()):
     """Find a column by exact header or any alias (case-insensitive)."""
-    # try exact
     if key in hmap:
         return hmap[key]
-    # case-insensitive / alias search
     lowered = {k.lower(): v for k, v in hmap.items()}
     if key.lower() in lowered:
         return lowered[key.lower()]
@@ -212,6 +209,45 @@ def _get_col(hmap, key, aliases=()):
         if a.lower() in lowered:
             return lowered[a.lower()]
     return None
+
+def _unmerge_ranges_overlapping_table(ws, r1, r2, allowed_cols_set):
+    """
+    Unmerge any merged cell ranges that intersect the table rows (r1..r2)
+    AND whose columns intersect the table's allowed columns. This prevents
+    merged summary blocks from intruding into the data area after row inserts.
+    """
+    to_unmerge = []
+    for m in list(ws.merged_cells.ranges):
+        min_col, min_row, max_col, max_row = m.min_col, m.min_row, m.max_col, m.max_row
+        row_overlap = not (max_row < r1 or min_row > r2)
+        col_overlap = any(c in allowed_cols_set for c in range(min_col, max_col + 1))
+        if row_overlap and col_overlap:
+            to_unmerge.append(m)
+    for m in to_unmerge:
+        ws.unmerge_cells(str(m))
+
+def _set_total_package_formula(ws, total_col_idx, first_data_row, last_data_row):
+    """
+    Locate a cell with text 'Total Package' and put a SUM formula in the next visible cell to the right.
+    Formula sums the Total column (preferred) across the table body. If Total column not found,
+    caller should pass Charge column index instead.
+    """
+    if total_col_idx is None:
+        return
+    col_letter = get_column_letter(total_col_idx)
+    rng = f"{col_letter}{first_data_row}:{col_letter}{last_data_row}"
+
+    max_row = min(ws.max_row, 200)
+    max_col = min(ws.max_column, 80)
+    for r in range(1, max_row + 1):
+        for c in range(1, max_col + 1):
+            v = ws.cell(r, c).value
+            if v is not None and str(v).strip().lower() == "total package":
+                # Find a value cell to the right (first blank or numeric-capable)
+                dest_c = c + 1
+                # write formula
+                ws.cell(r, dest_c, f"=SUM({rng})")
+                return  # first match is enough
 
 def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame) -> BytesIO:
     """
@@ -223,7 +259,9 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
         I9, B11, I15 = Email
     - Table rows filled and styled; Total = Qty * Charge.
     - Borders apply across through 'Notes' and 'When to Invoice' if those headers exist.
-    - Headers styled: Segoe UI, 12, bold, white font.
+    - Headers styled: Segoe UI 12 bold white.
+    - Any merged ranges that overlap the table body are unmerged to avoid corruption.
+    - "Total Package" formula is refreshed to sum the Total (preferred) or Charge column.
     """
     # Optional F2F mapping from cost sheet
     f2f_map = {}
@@ -236,7 +274,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
     groups = cleaned.groupby('Provider Name', dropna=False)
 
     zip_buf = BytesIO()
-    # dotted borders per request
     dotted = Side(style='dotted')
     border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
     font10 = Font(name="Segoe UI", size=10)
@@ -275,9 +312,9 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             c_Notes  = _get_col(hmap, "Notes")
             c_When   = _get_col(hmap, "When to Invoice", aliases=("When To Invoice","When-to-Invoice"))
 
-            # Header styling (font only; template handles fill color)
-            cols_for_header = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
-            for c in cols_for_header:
+            # Header style (Segoe UI 12 bold white)
+            header_cols = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
+            for c in header_cols:
                 ws.cell(hdr_row, c).font = header_font
 
             start_row = hdr_row + 1
@@ -287,7 +324,11 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             if n > 1:
                 ws.insert_rows(start_row + 1, amount=n - 1)
 
-            # Write only to mapped columns (prevents accidental writes e.g. to Q/R)
+            # After insertion, unmerge any merged ranges that overlap the table body columns
+            allowed_cols_set = set(header_cols)
+            _unmerge_ranges_overlapping_table(ws, start_row, start_row + n - 1, allowed_cols_set)
+
+            # Write only to mapped columns (prevents any writes to Q/R)
             for i, (_, r) in enumerate(dfp.iterrows()):
                 rr = start_row + i
                 typ   = r.get("Type", "")
@@ -315,25 +356,23 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                         total_val = None
                     ws.cell(rr, c_Total, total_val)
 
-            # Borders + body font (Segoe UI 10) over full table width INCLUDING Notes / When to Invoice
+            # Apply borders & body font ONLY to the exact table columns
             last_row = start_row + max(n - 1, 0)
-            table_cols = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
-            if not table_cols:
-                table_cols = [hdr_col, hdr_col+1]  # minimal safety
-            last_col = max(table_cols)
-            first_col = min(table_cols)
-
-            # Header row styling also gets borders & font 10? You asked size 12 for header;
-            # we'll keep header font at 12 and apply borders; body rows get size 10.
-            for c in range(first_col, last_col + 1):
-                cell = ws.cell(hdr_row, c)
-                cell.border = border  # border around header too
-
-            for r in range(start_row, last_row + 1):
-                for c in range(first_col, last_col + 1):
-                    cell = ws.cell(r, c)
+            for c in header_cols:
+                ws.cell(hdr_row, c).border = Border(top=Side(style='dotted'), bottom=Side(style='dotted'),
+                                                    left=Side(style='dotted'), right=Side(style='dotted'))
+            dotted = Side(style='dotted')
+            border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
+            font10 = Font(name="Segoe UI", size=10)
+            for rr in range(start_row, last_row + 1):
+                for cc in header_cols:
+                    cell = ws.cell(rr, cc)
                     cell.border = border
                     cell.font = font10
+
+            # Refresh "Total Package" formula: prefer 'Total' column; else use 'Charge'
+            summary_col = c_Total if c_Total else c_Charge
+            _set_total_package_formula(ws, summary_col, start_row, last_row)
 
             # Save workbook into ZIP under templates/
             out_bytes = BytesIO()
@@ -437,4 +476,4 @@ if st.button("Submit"):
             )
 
 st.markdown("---")
-st.caption("Headers: Segoe UI 12 bold white. Body: Segoe UI 10. Borders are dotted across all table columns, including Notes & When to Invoice.")
+st.caption("Headers: Segoe UI 12 bold white. Body: Segoe UI 10. Borders apply only to mapped table columns (no Q/R). Summary cells shift down intact; Total Package formula refreshed.")
