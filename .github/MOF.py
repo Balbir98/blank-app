@@ -46,7 +46,7 @@ def _read_any_table(uploaded_file, preferred_sheet_name=None):
 # Transformation Logic
 # ---------------------------
 
-ID_COLS = ['Random ID', 'Provider Name', 'Phone', 'Email']
+ID_COLS = ['Random ID', 'Name', 'Provider Name', 'Phone', 'Email']
 
 def _is_event_label(x):
     """
