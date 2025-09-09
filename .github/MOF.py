@@ -8,7 +8,7 @@ import streamlit as st
 # Excel handling / styling
 from openpyxl import load_workbook
 from openpyxl.styles import Border, Side, Font
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import get_column_letter, coordinate_to_tuple
 
 # ---------------------------
 # Utilities: robust readers
@@ -162,7 +162,6 @@ def _find_table_header_row(ws):
     Find a row containing 'Type' and 'Product' (side-by-side), and also
     'Month' and 'Date' on the same row somewhere to the right.
     Return (header_row_index, header_col_index, header_map[original header text -> col]).
-    Only maps headers present on that row; later we only write to known headers.
     """
     max_row = min(ws.max_row, 200)
     max_col = min(ws.max_column, 80)
@@ -201,8 +200,6 @@ def _get_col(hmap, key, aliases=()):
             return lowered[a.lower()]
     return None
 
-# --- helpers for summary block ---
-
 def _find_label_cell(ws, label_text):
     """Find the cell containing the label text (case-insensitive, stripped)."""
     t = label_text.lower()
@@ -223,20 +220,17 @@ def _value_cell_right(ws, r, c, search_span=6):
       2) Else the rightmost blank or numeric cell.
       3) Skip literal '£' cells (currency spacer).
     """
-    # prefer existing formula cells
     for cc in range(c + search_span, c, -1):
         v = ws.cell(r, cc).value
         if isinstance(v, str) and v.startswith("="):
             return r, cc
-    # else pick rightmost blank/numeric, skipping a literal '£'
     for cc in range(c + search_span, c, -1):
         v = ws.cell(r, cc).value
         if (v is None) or isinstance(v, (int, float)):
             return r, cc
         if isinstance(v, str) and v.strip() != "£":
-            # text but not the currency glyph – still usable
             return r, cc
-    return r, c + 1  # fallback
+    return r, c + 1
 
 def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame) -> BytesIO:
     """
@@ -251,9 +245,8 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
         * Discount = user input (Accounting)
         * Total Package Price = Total Package - Discount
         * VAT = Total Package Price / 5
-        * Overall Package Price = SUM(Total Package Price, VAT)
+        * Overall Package Price = SUM(Total Package Price, VAT) anchored to TPP column
     """
-    # Optional F2F mapping from cost sheet
     f2f_map = {}
     if 'F2F or Online?' in costs_df.columns:
         def _n(s): return None if pd.isna(s) else str(s).strip()
@@ -273,7 +266,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
     with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for provider, dfp in groups:
             wb = load_workbook(BytesIO(template_bytes))
-            ws = wb.active  # first sheet
+            ws = wb.active
 
             # Fixed cells
             provider_val = "" if pd.isna(provider) else str(provider)
@@ -288,10 +281,8 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             ws["B11"] = email_val
             ws["I15"] = email_val
 
-            # Find table and headers
+            # Table headers
             hdr_row, hdr_col, hmap = _find_table_header_row(ws)
-
-            # Explicit mapping
             c_Type   = _get_col(hmap, "Type")
             c_Prod   = _get_col(hmap, "Product")
             c_Month  = _get_col(hmap, "Month", aliases=("Event Month","Month of"))
@@ -303,15 +294,13 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             c_Notes  = _get_col(hmap, "Notes")
             c_When   = _get_col(hmap, "When to Invoice", aliases=("When To Invoice","When-to-Invoice"))
 
-            # Header styling
-            cols_for_header = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
-            for c in cols_for_header:
-                ws.cell(hdr_row, c).font = header_font
+            for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When]:
+                if c:
+                    ws.cell(hdr_row, c).font = header_font
 
             start_row = hdr_row + 1
             n = len(dfp)
 
-            # Insert rows to match number of items
             if n > 1:
                 ws.insert_rows(start_row + 1, amount=n - 1)
 
@@ -329,48 +318,36 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 if c_Type:   ws.cell(rr, c_Type,   typ)
                 if c_Prod:   ws.cell(rr, c_Prod,   prod)
                 if c_Month:  ws.cell(rr, c_Month,  month)
-                if c_Date:   ws.cell(rr, c_Date,   None)         # blank
+                if c_Date:   ws.cell(rr, c_Date,   None)
                 if c_F2F:    ws.cell(rr, c_F2F,    f2f_val)
                 if c_Qty:    ws.cell(rr, c_Qty,    qty)
-
-                # Charge (Accounting)
                 if c_Charge:
-                    ws.cell(rr, c_Charge, charge)
-                    ws.cell(rr, c_Charge).number_format = ACC_FMT
-
-                # Total = Qty * Charge (Accounting)
+                    ws.cell(rr, c_Charge, charge).number_format = ACC_FMT
                 if c_Total:
                     try:
                         total_val = (qty or 0) * (float(charge) if charge not in [None, ""] else 0.0)
                     except Exception:
                         total_val = None
-                    ws.cell(rr, c_Total, total_val)
-                    ws.cell(rr, c_Total).number_format = ACC_FMT
+                    ws.cell(rr, c_Total, total_val).number_format = ACC_FMT
 
             # Borders + body font
             last_row = start_row + max(n - 1, 0)
             table_cols = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
             if not table_cols:
                 table_cols = [hdr_col, hdr_col+1]
-            last_col = max(table_cols)
-            first_col = min(table_cols)
+            last_col = max(table_cols); first_col = min(table_cols)
 
-            # Header borders
             for c in range(first_col, last_col + 1):
-                cell = ws.cell(hdr_row, c)
-                cell.border = border
-
-            # Body borders + font
+                ws.cell(hdr_row, c).border = border
             for r in range(start_row, last_row + 1):
                 for c in range(first_col, last_col + 1):
                     cell = ws.cell(r, c)
                     cell.border = border
                     cell.font = font10
 
-            # ---------- Summary block: rebind formulas to the correct VALUE cells ----------
-            # Total column to sum (prefer 'Total', else 'Charge')
+            # ---------- Summary block (robust formulas) ----------
             total_col = c_Total if c_Total else c_Charge
-            tp_coord = disc_coord = tpp_coord = vat_coord = opp_coord = None
+            tp_coord = disc_coord = tpp_coord = vat_coord = None
 
             if total_col:
                 sum_rng = f"{get_column_letter(total_col)}{start_row}:{get_column_letter(total_col)}{last_row}"
@@ -384,7 +361,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     tp_cell.number_format = ACC_FMT
                     tp_coord = tp_cell.coordinate
 
-                # Discount (user input)
+                # Discount
                 r_d, c_d = _find_label_cell(ws, "Discount")
                 if r_d and c_d:
                     r_v, c_v = _value_cell_right(ws, r_d, c_d)
@@ -394,7 +371,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     disc_cell.number_format = ACC_FMT
                     disc_coord = disc_cell.coordinate
 
-                # Total Package Price = Total Package - Discount
+                # Total Package Price = TP - Discount
                 r_tpp, c_tpp = _find_label_cell(ws, "Total Package Price")
                 if r_tpp and c_tpp and tp_coord and disc_coord:
                     r_v, c_v = _value_cell_right(ws, r_tpp, c_tpp)
@@ -403,7 +380,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     tpp_cell.number_format = ACC_FMT
                     tpp_coord = tpp_cell.coordinate
 
-                # VAT = Total Package Price / 5
+                # VAT = TPP / 5
                 r_vat, c_vat = _find_label_cell(ws, "VAT")
                 if r_vat and c_vat and tpp_coord:
                     r_v, c_v = _value_cell_right(ws, r_vat, c_vat)
@@ -412,21 +389,19 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     vat_cell.number_format = ACC_FMT
                     vat_coord = vat_cell.coordinate
 
-                # Overall Package Price = SUM(TPP, VAT)  ← robust & explicit
+                # Overall Package Price = SUM(TPP, VAT) anchored to TPP's COLUMN
                 r_opp, c_opp = _find_label_cell(ws, "Overall Package Price")
                 if r_opp and c_opp and tpp_coord and vat_coord:
-                    r_v, c_v = _value_cell_right(ws, r_opp, c_opp)
-                    opp_cell = ws.cell(r_v, c_v)
+                    tpp_row, tpp_col_idx = coordinate_to_tuple(tpp_coord)
+                    opp_cell = ws.cell(r_opp, tpp_col_idx)  # same money column as TPP
                     opp_cell.value = f"=SUM({tpp_coord},{vat_coord})"
                     opp_cell.number_format = ACC_FMT
-                    opp_coord = opp_cell.coordinate
 
-            # Save workbook into ZIP under templates/
-            out_bytes = BytesIO()
-            wb.save(out_bytes)
-            out_bytes.seek(0)
+            # Save workbook into ZIP
+            out_bytes = BytesIO(); wb.save(out_bytes); out_bytes.seek(0)
             safe_provider = re.sub(r'[^A-Za-z0-9 _.-]+', '_', provider_val or "Unknown_Provider")
-            zf.writestr(f"templates/{safe_provider}.xlsx", out_bytes.getvalue())
+            with zf.open(f"templates/{safe_provider}.xlsx", "w") as fh:
+                fh.write(out_bytes.getvalue())
 
     zip_buf.seek(0)
     return zip_buf
@@ -506,4 +481,4 @@ if st.button("Submit"):
             )
 
 st.markdown("---")
-st.caption("Headers: Segoe UI 12 bold white. Body: Segoe UI 10. Borders dotted across all table columns (including Notes & When to Invoice). Accounting format (GBP) for Charge, Total and summary values. Summary formulas target the correct value cells automatically.")
+st.caption("Headers: Segoe UI 12 bold white. Body: Segoe UI 10. Borders dotted across all table columns (including Notes & When to Invoice). Accounting format (GBP) for Charge, Total and summary values. Overall Package Price anchored to the Total Package Price column.")
