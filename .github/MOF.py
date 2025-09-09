@@ -8,6 +8,7 @@ import streamlit as st
 # Excel handling / styling
 from openpyxl import load_workbook
 from openpyxl.styles import Border, Side, Font
+from openpyxl.utils import get_column_letter
 
 # ---------------------------
 # Utilities: robust readers
@@ -207,15 +208,17 @@ def _get_col(hmap, key, aliases=()):
 def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame) -> BytesIO:
     """
     Returns a ZIP containing one populated template per Provider.
-    - Fixed cells:
-        B7 = Provider Name
-        B9 = Main contact (Name sans comma)
-        G9 = Phone
-        I9, B11, I15 = Email
-    - Table rows filled and styled; Total = Qty * Charge.
-    - Borders apply across through 'Notes' and 'When to Invoice' if those headers exist.
-    - Headers styled: Segoe UI, 12, bold, white font.
-    - Charge & Total cells formatted as Accounting (GBP).
+    - Fixed cells: B7 (Provider), B9 (Main contact; comma removed), G9 (Phone), I9/B11/I15 (Email)
+    - Table rows filled; Total = Qty * Charge
+    - Borders across through 'Notes' and 'When to Invoice'
+    - Header style: Segoe UI 12 bold white
+    - Charge & Total formatted Accounting (GBP)
+    - Summary block wired with formulas:
+        * Total Package = SUM(Total column) [fallback to Charge if Total absent]
+        * Discount = user input (Accounting)
+        * Total Package Price = Total Package - Discount
+        * VAT = Total Package Price / 5
+        * Overall Package Price = Total Package Price + VAT
     """
     # Optional F2F mapping from cost sheet
     f2f_map = {}
@@ -228,12 +231,10 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
     groups = cleaned.groupby('Provider Name', dropna=False)
 
     zip_buf = BytesIO()
-    # dotted borders per request
     dotted = Side(style='dotted')
     border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
     font10 = Font(name="Segoe UI", size=10)
     header_font = Font(name="Segoe UI", size=12, bold=True, color="FFFFFF")
-    # Excel Accounting (GBP) format
     ACC_FMT = '_-£* #,##0.00_-;_-£* -#,##0.00_-;_-£* "-"??_-;_-@_-'
 
     with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -257,7 +258,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             # Find table and headers
             hdr_row, hdr_col, hmap = _find_table_header_row(ws)
 
-            # Explicit, safe mapping only to the intended columns
+            # Explicit mapping
             c_Type   = _get_col(hmap, "Type")
             c_Prod   = _get_col(hmap, "Product")
             c_Month  = _get_col(hmap, "Month", aliases=("Event Month","Month of"))
@@ -269,7 +270,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             c_Notes  = _get_col(hmap, "Notes")
             c_When   = _get_col(hmap, "When to Invoice", aliases=("When To Invoice","When-to-Invoice"))
 
-            # Header styling (font only; template handles fill color)
+            # Header styling
             cols_for_header = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
             for c in cols_for_header:
                 ws.cell(hdr_row, c).font = header_font
@@ -281,7 +282,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             if n > 1:
                 ws.insert_rows(start_row + 1, amount=n - 1)
 
-            # Write only to mapped columns
+            # Fill rows
             for i, (_, r) in enumerate(dfp.iterrows()):
                 rr = start_row + i
                 typ   = r.get("Type", "")
@@ -299,12 +300,12 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 if c_F2F:    ws.cell(rr, c_F2F,    f2f_val)
                 if c_Qty:    ws.cell(rr, c_Qty,    qty)
 
-                # Charge (numeric), formatted as Accounting
+                # Charge (Accounting)
                 if c_Charge:
                     ws.cell(rr, c_Charge, charge)
                     ws.cell(rr, c_Charge).number_format = ACC_FMT
 
-                # Total = Qty * Charge (numeric), formatted as Accounting
+                # Total = Qty * Charge (Accounting)
                 if c_Total:
                     try:
                         total_val = (qty or 0) * (float(charge) if charge not in [None, ""] else 0.0)
@@ -313,7 +314,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     ws.cell(rr, c_Total, total_val)
                     ws.cell(rr, c_Total).number_format = ACC_FMT
 
-            # Borders + body font (Segoe UI 10) over full table width INCLUDING Notes / When to Invoice
+            # Borders + body font
             last_row = start_row + max(n - 1, 0)
             table_cols = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
             if not table_cols:
@@ -332,6 +333,59 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     cell = ws.cell(r, c)
                     cell.border = border
                     cell.font = font10
+
+            # ---------- Summary block: rebind formulas ----------
+            def _find_label_cell(label_text):
+                t = label_text.lower()
+                max_r = min(ws.max_row, 400)
+                max_c = min(ws.max_column, 120)
+                for rr in range(1, max_r + 1):
+                    for cc in range(1, max_c + 1):
+                        v = ws.cell(rr, cc).value
+                        if v is not None and str(v).strip().lower() == t:
+                            return rr, cc
+                return None, None
+
+            # Total column to sum (prefer 'Total', else 'Charge')
+            total_col = c_Total if c_Total else c_Charge
+            if total_col:
+                sum_rng = f"{get_column_letter(total_col)}{start_row}:{get_column_letter(total_col)}{last_row}"
+
+                # Total Package
+                r_tp, c_tp = _find_label_cell("Total Package")
+                if r_tp and c_tp:
+                    tp_cell = ws.cell(r_tp, c_tp + 1)
+                    tp_cell.value = f"=SUM({sum_rng})"
+                    tp_cell.number_format = ACC_FMT
+
+                # Discount (user input)
+                r_d, c_d = _find_label_cell("Discount")
+                if r_d and c_d:
+                    disc_cell = ws.cell(r_d, c_d + 1)
+                    if disc_cell.value is None:
+                        disc_cell.value = 0
+                    disc_cell.number_format = ACC_FMT
+
+                # Total Package Price = Total Package - Discount
+                r_tpp, c_tpp = _find_label_cell("Total Package Price")
+                if r_tpp and c_tpp and r_tp and c_tp and r_d and c_d:
+                    ws.cell(r_tpp, c_tpp + 1,
+                            f"={ws.cell(r_tp, c_tp + 1).coordinate}-{ws.cell(r_d, c_d + 1).coordinate}"
+                           ).number_format = ACC_FMT
+
+                # VAT = Total Package Price / 5
+                r_v, c_v = _find_label_cell("VAT")
+                if r_v and c_v and r_tpp and c_tpp:
+                    ws.cell(r_v, c_v + 1,
+                            f"={ws.cell(r_tpp, c_tpp + 1).coordinate}/5"
+                           ).number_format = ACC_FMT
+
+                # Overall Package Price = TPP + VAT
+                r_op, c_op = _find_label_cell("Overall Package Price")
+                if r_op and c_op and r_tpp and c_tpp and r_v and c_v:
+                    ws.cell(r_op, c_op + 1,
+                            f"={ws.cell(r_tpp, c_tpp + 1).coordinate}+{ws.cell(r_v, c_v + 1).coordinate}"
+                           ).number_format = ACC_FMT
 
             # Save workbook into ZIP under templates/
             out_bytes = BytesIO()
@@ -425,4 +479,4 @@ if st.button("Submit"):
             )
 
 st.markdown("---")
-st.caption("Headers: Segoe UI 12 bold white. Body: Segoe UI 10. Borders dotted across all table columns (including Notes & When to Invoice). Charge & Total in Accounting format (GBP).")
+st.caption("Headers: Segoe UI 12 bold white. Body: Segoe UI 10. Borders dotted across all table columns (including Notes & When to Invoice). Charge & Total in Accounting format (GBP). Summary block formulas rebound after insertion.")
