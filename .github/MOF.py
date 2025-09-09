@@ -183,36 +183,21 @@ def _find_label_cell(ws, label_text):
                 return rr, cc
     return None, None
 
-def _value_cell_right(ws, r, c, search_span=8):
-    # 1) prefer rightmost formula cell
-    for cc in range(c + search_span, c, -1):
+def _value_cell_right_nearest(ws, r, c, search_span=8):
+    """
+    Pick the **nearest** valid value cell to the right of a label.
+    Skip the literal currency cell ('£') and dashed placeholders.
+    """
+    for cc in range(c + 1, c + 1 + search_span):
         v = ws.cell(r, cc).value
-        if isinstance(v, str) and v.startswith("="):
+        # skip currency symbol and dash placeholders
+        if isinstance(v, str) and v.strip() in {"£", "-"}:
+            continue
+        # first blank, numeric, or formula cell is our target (nearest to label)
+        if v is None or isinstance(v, (int, float)) or (isinstance(v, str) and v.startswith("=")):
             return r, cc
-    # 2) else rightmost blank/numeric, skip literal '£'
-    for cc in range(c + search_span, c, -1):
-        v = ws.cell(r, cc).value
-        if (v is None) or isinstance(v, (int, float)):
-            return r, cc
-        if isinstance(v, str) and v.strip() != "£":
-            return r, cc
+    # fallback: the very next cell
     return r, c + 1
-
-def _top_left_of_merged(ws, r, c):
-    for rng in ws.merged_cells.ranges:
-        if rng.min_row <= r <= rng.max_row and rng.min_col <= c <= rng.max_col:
-            return rng.min_row, rng.min_col
-    return r, c
-
-def _write_merge_safe(ws, r, c, value, number_format=None):
-    rr, cc = _top_left_of_merged(ws, r, c)
-    cell = ws.cell(rr, cc)
-    # clear old to break sticky formulas
-    cell.value = None
-    cell.value = value
-    if number_format:
-        cell.number_format = number_format
-    return cell
 
 # ---------------------------
 # Template population
@@ -302,14 +287,15 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             table_cols = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
             if not table_cols: table_cols = [hdr_col, hdr_col+1]
             first_col, last_col = min(table_cols), max(table_cols)
-            for c in range(first_col, last_col + 1): ws.cell(hdr_row, c).border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
+            for c in range(first_col, last_col + 1):
+                ws.cell(hdr_row, c).border = border
             for r in range(start_row, last_row + 1):
                 for c in range(first_col, last_col + 1):
                     cell = ws.cell(r, c)
                     cell.border = border
                     cell.font = font10
 
-            # ---------- Summary block (explicit & anchored) ----------
+            # ---------- Summary block (NEAREST value cell logic) ----------
             total_col = c_Total if c_Total else c_Charge
             ACC = ACC_FMT
             tp_coord = disc_coord = tpp_coord = vat_coord = None
@@ -320,39 +306,39 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 # Total Package
                 r_tp, c_tp = _find_label_cell(ws, "Total Package")
                 if r_tp and c_tp:
-                    r_v, c_v = _value_cell_right(ws, r_tp, c_tp)
-                    tp_cell = _write_merge_safe(ws, r_v, c_v, f"=SUM({sum_rng})", ACC)
-                    tp_coord = tp_cell.coordinate
+                    rv, cv = _value_cell_right_nearest(ws, r_tp, c_tp, search_span=10)
+                    ws.cell(rv, cv, f"=SUM({sum_rng})").number_format = ACC
+                    tp_coord = ws.cell(rv, cv).coordinate
 
                 # Discount
                 r_d, c_d = _find_label_cell(ws, "Discount")
                 if r_d and c_d:
-                    r_v, c_v = _value_cell_right(ws, r_d, c_d)
-                    existing = ws.cell(r_v, c_v).value
-                    disc_cell = _write_merge_safe(ws, r_v, c_v, 0 if existing is None else existing, ACC)
-                    disc_coord = disc_cell.coordinate
+                    rv, cv = _value_cell_right_nearest(ws, r_d, c_d, search_span=10)
+                    if ws.cell(rv, cv).value is None:
+                        ws.cell(rv, cv, 0).number_format = ACC
+                    else:
+                        ws.cell(rv, cv).number_format = ACC
+                    disc_coord = ws.cell(rv, cv).coordinate
 
                 # Total Package Price = TP - Discount
                 r_tpp, c_tpp = _find_label_cell(ws, "Total Package Price")
                 if r_tpp and c_tpp and tp_coord and disc_coord:
-                    r_v, c_v = _value_cell_right(ws, r_tpp, c_tpp)
-                    tpp_cell = _write_merge_safe(ws, r_v, c_v, f"={tp_coord}-{disc_coord}", ACC)
-                    tpp_coord = tpp_cell.coordinate
+                    rv, cv = _value_cell_right_nearest(ws, r_tpp, c_tpp, search_span=10)
+                    ws.cell(rv, cv, f"={tp_coord}-{disc_coord}").number_format = ACC
+                    tpp_coord = ws.cell(rv, cv).coordinate
 
                 # VAT = TPP / 5
                 r_vat, c_vat = _find_label_cell(ws, "VAT")
                 if r_vat and c_vat and tpp_coord:
-                    r_v, c_v = _value_cell_right(ws, r_vat, c_vat)
-                    vat_cell = _write_merge_safe(ws, r_v, c_v, f"={tpp_coord}/5", ACC)
-                    vat_coord = vat_cell.coordinate
+                    rv, cv = _value_cell_right_nearest(ws, r_vat, c_vat, search_span=10)
+                    ws.cell(rv, cv, f"={tpp_coord}/5").number_format = ACC
+                    vat_coord = ws.cell(rv, cv).coordinate
 
                 # Overall Package Price = TPP + VAT
                 r_opp, c_opp = _find_label_cell(ws, "Overall Package Price")
                 if r_opp and c_opp and tpp_coord and vat_coord:
-                    # force the result to live in the SAME money column as TPP
-                    tpp_row, tpp_col_idx = coordinate_to_tuple(tpp_coord)
-                    # write directly to top-left of any merged range at (r_opp, tpp_col_idx)
-                    _write_merge_safe(ws, r_opp, tpp_col_idx, f"={tpp_coord}+{vat_coord}", ACC)
+                    rv, cv = _value_cell_right_nearest(ws, r_opp, c_opp, search_span=10)
+                    ws.cell(rv, cv, f"={tpp_coord}+{vat_coord}").number_format = ACC
 
             # Save workbook into ZIP
             out_bytes = BytesIO(); wb.save(out_bytes); out_bytes.seek(0)
@@ -436,4 +422,4 @@ if st.button("Submit"):
             )
 
 st.markdown("---")
-st.caption("Overall Package Price is now hard-set to = <Total Package Price> + <VAT> in the same money column as TPP, with merge-safe overwriting.")
+st.caption("Summary cells use the **nearest** editable value cell to the right of the label (e.g., I31 → J31). Overall Package Price is always `=TPP + VAT`.")
