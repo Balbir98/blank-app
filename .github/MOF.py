@@ -191,10 +191,8 @@ def _find_table_header_row(ws):
 
 def _get_col(hmap, key, aliases=()):
     """Find a column by exact header or any alias (case-insensitive)."""
-    # try exact
     if key in hmap:
         return hmap[key]
-    # case-insensitive / alias search
     lowered = {k.lower(): v for k, v in hmap.items()}
     if key.lower() in lowered:
         return lowered[key.lower()]
@@ -213,12 +211,12 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
     - Borders across through 'Notes' and 'When to Invoice'
     - Header style: Segoe UI 12 bold white
     - Charge & Total formatted Accounting (GBP)
-    - Summary block wired with formulas:
+    - Summary block formulas:
         * Total Package = SUM(Total column) [fallback to Charge if Total absent]
         * Discount = user input (Accounting)
         * Total Package Price = Total Package - Discount
         * VAT = Total Package Price / 5
-        * Overall Package Price = Total Package Price + VAT
+        * Overall Package Price = SUM(Total Package Price, VAT)
     """
     # Optional F2F mapping from cost sheet
     f2f_map = {}
@@ -369,23 +367,23 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 # Total Package Price = Total Package - Discount
                 r_tpp, c_tpp = _find_label_cell("Total Package Price")
                 if r_tpp and c_tpp and r_tp and c_tp and r_d and c_d:
-                    ws.cell(r_tpp, c_tpp + 1,
-                            f"={ws.cell(r_tp, c_tp + 1).coordinate}-{ws.cell(r_d, c_d + 1).coordinate}"
-                           ).number_format = ACC_FMT
+                    tpp_cell = ws.cell(r_tpp, c_tpp + 1)
+                    tpp_cell.value = f"={ws.cell(r_tp, c_tp + 1).coordinate}-{ws.cell(r_d, c_d + 1).coordinate}"
+                    tpp_cell.number_format = ACC_FMT
 
                 # VAT = Total Package Price / 5
                 r_v, c_v = _find_label_cell("VAT")
                 if r_v and c_v and r_tpp and c_tpp:
-                    ws.cell(r_v, c_v + 1,
-                            f"={ws.cell(r_tpp, c_tpp + 1).coordinate}/5"
-                           ).number_format = ACC_FMT
+                    vat_cell = ws.cell(r_v, c_v + 1)
+                    vat_cell.value = f"={ws.cell(r_tpp, c_tpp + 1).coordinate}/5"
+                    vat_cell.number_format = ACC_FMT
 
-                # Overall Package Price = TPP + VAT
+                # Overall Package Price = SUM(TPP, VAT)  ← robust, no "=+" quirk
                 r_op, c_op = _find_label_cell("Overall Package Price")
                 if r_op and c_op and r_tpp and c_tpp and r_v and c_v:
-                    ws.cell(r_op, c_op + 1,
-                            f"={ws.cell(r_tpp, c_tpp + 1).coordinate}+{ws.cell(r_v, c_v + 1).coordinate}"
-                           ).number_format = ACC_FMT
+                    opp_cell = ws.cell(r_op, c_op + 1)
+                    opp_cell.value = f"=SUM({ws.cell(r_tpp, c_tpp + 1).coordinate},{ws.cell(r_v, c_v + 1).coordinate})"
+                    opp_cell.number_format = ACC_FMT
 
             # Save workbook into ZIP under templates/
             out_bytes = BytesIO()
@@ -479,4 +477,4 @@ if st.button("Submit"):
             )
 
 st.markdown("---")
-st.caption("Headers: Segoe UI 12 bold white. Body: Segoe UI 10. Borders dotted across all table columns (including Notes & When to Invoice). Charge & Total in Accounting format (GBP). Summary block formulas rebound after insertion.")
+st.caption("Headers: Segoe UI 12 bold white. Body: Segoe UI 10. Borders dotted across all table columns (including Notes & When to Invoice). Charge & Total in Accounting format (GBP). Summary block uses SUM formulas after insertion.")
