@@ -173,12 +173,10 @@ def _find_table_header_row(ws):
             if v is not None and str(v).strip().lower() == "type":
                 nxt = row_vals[c] if c < max_col else None
                 if nxt is not None and str(nxt).strip().lower() == "product":
-                    # Check Month & Date exist to the right in this row
                     rest = row_vals[c-1:]
                     month_ok = any((rv is not None and str(rv).strip().lower()=="month") for rv in rest)
                     date_ok  = any((rv is not None and str(rv).strip().lower()=="date")  for rv in rest)
                     if month_ok and date_ok:
-                        # Build a precise header map: only non-empty cells on this header row
                         hmap = {}
                         for c2 in range(1, max_col + 1):
                             v2 = ws.cell(r, c2).value
@@ -202,6 +200,43 @@ def _get_col(hmap, key, aliases=()):
         if a.lower() in lowered:
             return lowered[a.lower()]
     return None
+
+# --- helpers for summary block ---
+
+def _find_label_cell(ws, label_text):
+    """Find the cell containing the label text (case-insensitive, stripped)."""
+    t = label_text.lower()
+    max_r = min(ws.max_row, 400)
+    max_c = min(ws.max_column, 120)
+    for rr in range(1, max_r + 1):
+        for cc in range(1, max_c + 1):
+            v = ws.cell(rr, cc).value
+            if v is not None and str(v).strip().lower() == t:
+                return rr, cc
+    return None, None
+
+def _value_cell_right(ws, r, c, search_span=6):
+    """
+    Pick the 'value' cell to the right of a label.
+    Heuristics:
+      1) Prefer the rightmost cell within next `search_span` that already has a formula (=...).
+      2) Else the rightmost blank or numeric cell.
+      3) Skip literal '£' cells (currency spacer).
+    """
+    # prefer existing formula cells
+    for cc in range(c + search_span, c, -1):
+        v = ws.cell(r, cc).value
+        if isinstance(v, str) and v.startswith("="):
+            return r, cc
+    # else pick rightmost blank/numeric, skipping a literal '£'
+    for cc in range(c + search_span, c, -1):
+        v = ws.cell(r, cc).value
+        if (v is None) or isinstance(v, (int, float)):
+            return r, cc
+        if isinstance(v, str) and v.strip() != "£":
+            # text but not the currency glyph – still usable
+            return r, cc
+    return r, c + 1  # fallback
 
 def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame) -> BytesIO:
     """
@@ -316,7 +351,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             last_row = start_row + max(n - 1, 0)
             table_cols = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
             if not table_cols:
-                table_cols = [hdr_col, hdr_col+1]  # minimal safety
+                table_cols = [hdr_col, hdr_col+1]
             last_col = max(table_cols)
             first_col = min(table_cols)
 
@@ -332,58 +367,59 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     cell.border = border
                     cell.font = font10
 
-            # ---------- Summary block: rebind formulas ----------
-            def _find_label_cell(label_text):
-                t = label_text.lower()
-                max_r = min(ws.max_row, 400)
-                max_c = min(ws.max_column, 120)
-                for rr in range(1, max_r + 1):
-                    for cc in range(1, max_c + 1):
-                        v = ws.cell(rr, cc).value
-                        if v is not None and str(v).strip().lower() == t:
-                            return rr, cc
-                return None, None
-
+            # ---------- Summary block: rebind formulas to the correct VALUE cells ----------
             # Total column to sum (prefer 'Total', else 'Charge')
             total_col = c_Total if c_Total else c_Charge
+            tp_coord = disc_coord = tpp_coord = vat_coord = opp_coord = None
+
             if total_col:
                 sum_rng = f"{get_column_letter(total_col)}{start_row}:{get_column_letter(total_col)}{last_row}"
 
                 # Total Package
-                r_tp, c_tp = _find_label_cell("Total Package")
+                r_tp, c_tp = _find_label_cell(ws, "Total Package")
                 if r_tp and c_tp:
-                    tp_cell = ws.cell(r_tp, c_tp + 1)
+                    r_v, c_v = _value_cell_right(ws, r_tp, c_tp)
+                    tp_cell = ws.cell(r_v, c_v)
                     tp_cell.value = f"=SUM({sum_rng})"
                     tp_cell.number_format = ACC_FMT
+                    tp_coord = tp_cell.coordinate
 
                 # Discount (user input)
-                r_d, c_d = _find_label_cell("Discount")
+                r_d, c_d = _find_label_cell(ws, "Discount")
                 if r_d and c_d:
-                    disc_cell = ws.cell(r_d, c_d + 1)
+                    r_v, c_v = _value_cell_right(ws, r_d, c_d)
+                    disc_cell = ws.cell(r_v, c_v)
                     if disc_cell.value is None:
                         disc_cell.value = 0
                     disc_cell.number_format = ACC_FMT
+                    disc_coord = disc_cell.coordinate
 
                 # Total Package Price = Total Package - Discount
-                r_tpp, c_tpp = _find_label_cell("Total Package Price")
-                if r_tpp and c_tpp and r_tp and c_tp and r_d and c_d:
-                    tpp_cell = ws.cell(r_tpp, c_tpp + 1)
-                    tpp_cell.value = f"={ws.cell(r_tp, c_tp + 1).coordinate}-{ws.cell(r_d, c_d + 1).coordinate}"
+                r_tpp, c_tpp = _find_label_cell(ws, "Total Package Price")
+                if r_tpp and c_tpp and tp_coord and disc_coord:
+                    r_v, c_v = _value_cell_right(ws, r_tpp, c_tpp)
+                    tpp_cell = ws.cell(r_v, c_v)
+                    tpp_cell.value = f"={tp_coord}-{disc_coord}"
                     tpp_cell.number_format = ACC_FMT
+                    tpp_coord = tpp_cell.coordinate
 
                 # VAT = Total Package Price / 5
-                r_v, c_v = _find_label_cell("VAT")
-                if r_v and c_v and r_tpp and c_tpp:
-                    vat_cell = ws.cell(r_v, c_v + 1)
-                    vat_cell.value = f"={ws.cell(r_tpp, c_tpp + 1).coordinate}/5"
+                r_vat, c_vat = _find_label_cell(ws, "VAT")
+                if r_vat and c_vat and tpp_coord:
+                    r_v, c_v = _value_cell_right(ws, r_vat, c_vat)
+                    vat_cell = ws.cell(r_v, c_v)
+                    vat_cell.value = f"={tpp_coord}/5"
                     vat_cell.number_format = ACC_FMT
+                    vat_coord = vat_cell.coordinate
 
-                # Overall Package Price = SUM(TPP, VAT)  ← robust, no "=+" quirk
-                r_op, c_op = _find_label_cell("Overall Package Price")
-                if r_op and c_op and r_tpp and c_tpp and r_v and c_v:
-                    opp_cell = ws.cell(r_op, c_op + 1)
-                    opp_cell.value = f"=SUM({ws.cell(r_tpp, c_tpp + 1).coordinate},{ws.cell(r_v, c_v + 1).coordinate})"
+                # Overall Package Price = SUM(TPP, VAT)  ← robust & explicit
+                r_opp, c_opp = _find_label_cell(ws, "Overall Package Price")
+                if r_opp and c_opp and tpp_coord and vat_coord:
+                    r_v, c_v = _value_cell_right(ws, r_opp, c_opp)
+                    opp_cell = ws.cell(r_v, c_v)
+                    opp_cell.value = f"=SUM({tpp_coord},{vat_coord})"
                     opp_cell.number_format = ACC_FMT
+                    opp_coord = opp_cell.coordinate
 
             # Save workbook into ZIP under templates/
             out_bytes = BytesIO()
@@ -421,7 +457,6 @@ if st.button("Submit"):
         st.error("Please upload both the Zoho Forms export and the MOF Cost Sheet.")
     else:
         with st.spinner("Processing..."):
-            # Read inputs
             try:
                 form_df = _read_any_table(form_file, preferred_sheet_name="Form")
             except Exception as e:
@@ -433,27 +468,22 @@ if st.button("Submit"):
                 st.exception(RuntimeError(f"Failed to read the MOF Cost Sheet: {e}"))
                 st.stop()
 
-            # Transform
             try:
                 cleaned = transform(form_df, costs_df)
             except Exception as e:
                 st.exception(e)
                 st.stop()
 
-            # Build results.zip with templates (if provided) + data/cleaned_output.xlsx
             zip_buf = BytesIO()
             with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-                # Add cleaned_output.xlsx
                 cleaned_bytes = BytesIO()
                 cleaned.to_excel(cleaned_bytes, index=False)
                 zf.writestr("data/cleaned_output.xlsx", cleaned_bytes.getvalue())
 
-                # Optional: templates
                 if template_file is not None:
                     try:
                         template_bytes = template_file.read()
                         tpl_zip = _populate_template_bytes(template_bytes, cleaned, costs_df)
-                        # Copy files from tpl_zip into templates/ folder in our main ZIP
                         with zipfile.ZipFile(tpl_zip, 'r') as tplzf:
                             for info in tplzf.infolist():
                                 zf.writestr(info.filename, tplzf.read(info.filename))
@@ -462,7 +492,6 @@ if st.button("Submit"):
 
             zip_buf.seek(0)
 
-            # Summary & download
             st.success(f"Done. Cleaned {len(cleaned)} rows.")
             st.dataframe(cleaned.head(100), use_container_width=True)
             missing_costs = cleaned['Cost'].isna().sum()
@@ -477,4 +506,4 @@ if st.button("Submit"):
             )
 
 st.markdown("---")
-st.caption("Headers: Segoe UI 12 bold white. Body: Segoe UI 10. Borders dotted across all table columns (including Notes & When to Invoice). Charge & Total in Accounting format (GBP). Summary block uses SUM formulas after insertion.")
+st.caption("Headers: Segoe UI 12 bold white. Body: Segoe UI 10. Borders dotted across all table columns (including Notes & When to Invoice). Accounting format (GBP) for Charge, Total and summary values. Summary formulas target the correct value cells automatically.")
