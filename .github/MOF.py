@@ -15,6 +15,9 @@ from openpyxl.utils import get_column_letter, coordinate_to_tuple
 # ---------------------------
 
 def _read_any_table(uploaded_file, preferred_sheet_name=None):
+    """
+    Read CSV or Excel into a DataFrame.
+    """
     name = uploaded_file.name.lower()
     ext = os.path.splitext(name)[1]
     if ext in [".csv", ".txt"]:
@@ -44,6 +47,7 @@ def _read_any_table(uploaded_file, preferred_sheet_name=None):
 ID_COLS = ['Random ID', 'Provider Name', 'Name', 'Phone', 'Email']
 
 def _is_event_label(x):
+    """Heuristic: is a subheader a date/month/quarter string?"""
     if pd.isna(x):
         return False
     s = str(x).strip()
@@ -52,11 +56,15 @@ def _is_event_label(x):
         return True
     if s in ['Q1','Q2','Q3','Q4','Monthly','Quarterly']:
         return True
-    if re.search(r'\d', s):
+    if re.search(r'\d', s):  # e.g., "4th February - Midlands"
         return True
     return False
 
 def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert Zoho's wide export to normalized rows and join Cost from MOF sheet.
+    - “Option” rule is applied for both named and unnamed columns.
+    """
     if form_df.shape[0] < 2:
         return pd.DataFrame(columns=[
             'Random ID','Provider Name','Name','Phone','Email',
@@ -72,7 +80,7 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
         for j, col in enumerate(form_df.columns):
             val = row[col]
             if not str(col).startswith('Unnamed'):
-                if col not in ID_COLS and col not in ['Added Time','Referrer Name','Task Owner']:
+                if col not in ID_COLS and col not in ['Added Time', 'Referrer Name', 'Task Owner']:
                     current_type = col
             if pd.isna(val):
                 continue
@@ -81,7 +89,8 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
             text_val = str(val).strip()
 
             if not str(col).startswith('Unnamed'):
-                if col in ID_COLS or col in ['Added Time','Referrer Name','Task Owner']:
+                # Named column: apply Option rule too (bug fix)
+                if col in ID_COLS or col in ['Added Time', 'Referrer Name', 'Task Owner']:
                     continue
                 if re.search(r'\boption(s)?\b', text_val, flags=re.I) and not pd.isna(sub):
                     prod = str(sub).strip()
@@ -94,6 +103,7 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
                 records.append({'_ridx': ridx, 'Type': current_type,
                                 'Event Date (if applicable)': evt, 'Product': prod})
             else:
+                # Unnamed column path
                 if re.search(r'\boption(s)?\b', text_val, flags=re.I):
                     prod = str(sub).strip() if not pd.isna(sub) else text_val
                     evt = None
@@ -111,12 +121,14 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
 
     out = pd.DataFrame.from_records(records)
 
+    # Attach ID columns
     for c in ID_COLS:
         out[c] = out['_ridx'].map(data_rows[c]) if c in data_rows.columns else None
 
     out = out[['Random ID','Provider Name','Name','Phone','Email',
                'Type','Event Date (if applicable)','Product']]
 
+    # Join Cost
     def _norm(s): return None if pd.isna(s) else str(s).strip()
     if not set(['Type','Product','Cost']).issubset(costs_df.columns):
         raise ValueError("Cost sheet must contain columns: Type, Product, Cost")
@@ -139,12 +151,19 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------
 
 def _sanitize_name(name: str) -> str:
+    """Remove commas and extra whitespace."""
     if pd.isna(name):
         return ""
     s = str(name).replace(",", " ")
     return re.sub(r"\s+", " ", s).strip()
 
 def _find_table_header_row(ws):
+    """
+    Find a row containing 'Type' and 'Product' (side-by-side), and also
+    'Month' and 'Date' on the same row somewhere to the right.
+    Return (header_row_index, header_col_index, header_map[original header text -> col]).
+    Only maps headers present on that row; later we only write to known headers.
+    """
     max_row = min(ws.max_row, 200)
     max_col = min(ws.max_column, 80)
     for r in range(1, max_row + 1):
@@ -154,29 +173,40 @@ def _find_table_header_row(ws):
             if v is not None and str(v).strip().lower() == "type":
                 nxt = row_vals[c] if c < max_col else None
                 if nxt is not None and str(nxt).strip().lower() == "product":
+                    # Check Month & Date exist to the right in this row
                     rest = row_vals[c-1:]
-                    if any(rv and str(rv).strip().lower()=="month" for rv in rest) and \
-                       any(rv and str(rv).strip().lower()=="date"  for rv in rest):
+                    month_ok = any((rv is not None and str(rv).strip().lower()=="month") for rv in rest)
+                    date_ok  = any((rv is not None and str(rv).strip().lower()=="date")  for rv in rest)
+                    if month_ok and date_ok:
+                        # Build a precise header map: only non-empty cells on this header row
                         hmap = {}
                         for c2 in range(1, max_col + 1):
                             v2 = ws.cell(r, c2).value
-                            if v2 is None: continue
-                            hmap[str(v2).strip()] = c2
+                            if v2 is None:
+                                continue
+                            key = str(v2).strip()
+                            hmap[key] = c2
                         return r, c, hmap
     raise RuntimeError("Could not find the table header row with 'Type' and 'Product'.")
 
 def _get_col(hmap, key, aliases=()):
+    """Find a column by exact header or any alias (case-insensitive)."""
+    # try exact
     if key in hmap:
         return hmap[key]
+    # case-insensitive / alias search
     lowered = {k.lower(): v for k, v in hmap.items()}
     if key.lower() in lowered:
         return lowered[key.lower()]
     for a in aliases:
-        if a in hmap: return hmap[a]
-        if a.lower() in lowered: return lowered[a.lower()]
+        if a in hmap:
+            return hmap[a]
+        if a.lower() in lowered:
+            return lowered[a.lower()]
     return None
 
 def _find_label_cell(ws, label_text):
+    """Find the cell containing the label text (case-insensitive, stripped)."""
     t = label_text.lower()
     max_r = min(ws.max_row, 400)
     max_c = min(ws.max_column, 120)
@@ -188,19 +218,26 @@ def _find_label_cell(ws, label_text):
     return None, None
 
 def _value_cell_right(ws, r, c, search_span=8):
-    # prefer rightmost formula
+    """
+    Pick the 'value' cell to the right of a label.
+    Heuristics:
+      1) Prefer the rightmost cell within next `search_span` that already has a formula (=...).
+      2) Else the rightmost blank or numeric cell.
+      3) Skip literal '£' cells (currency spacer).
+    """
+    # prefer existing formula cells
     for cc in range(c + search_span, c, -1):
         v = ws.cell(r, cc).value
         if isinstance(v, str) and v.startswith("="):
             return r, cc
-    # rightmost blank/numeric, skipping literal "£"
+    # else pick rightmost blank/numeric, skipping a literal '£'
     for cc in range(c + search_span, c, -1):
         v = ws.cell(r, cc).value
         if (v is None) or isinstance(v, (int, float)):
             return r, cc
         if isinstance(v, str) and v.strip() != "£":
             return r, cc
-    return r, c + 1
+    return r, c + 1  # fallback
 
 def _top_left_of_merged(ws, r, c):
     """Return top-left (row,col) of the merged range containing (r,c), else (r,c)."""
@@ -219,7 +256,21 @@ def _write_merge_safe(ws, r, c, value, number_format=None):
     return cell
 
 def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame) -> BytesIO:
-    # Optional F2F mapping
+    """
+    Returns a ZIP containing one populated template per Provider.
+    - Fixed cells: B7 (Provider), B9 (Main contact; comma removed), G9 (Phone), I9/B11/I15 (Email)
+    - Table rows filled; Total = Qty * Charge
+    - Borders across through 'Notes' and 'When to Invoice'
+    - Header style: Segoe UI 12 bold white
+    - Charge & Total formatted Accounting (GBP)
+    - Summary formulas (merge-safe):
+        * Total Package = SUM(Total column) [fallback to Charge if Total absent]
+        * Discount = user input (Accounting)
+        * Total Package Price = Total Package - Discount
+        * VAT = Total Package Price / 5
+        * Overall Package Price = SUM(Total Package Price, VAT)
+    """
+    # Optional F2F mapping from cost sheet
     f2f_map = {}
     if 'F2F or Online?' in costs_df.columns:
         def _n(s): return None if pd.isna(s) else str(s).strip()
@@ -227,22 +278,26 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
         tmp['Product_norm'] = tmp['Product'].apply(_n)
         f2f_map = dict(zip(tmp['Product_norm'], tmp['F2F or Online?']))
 
+    groups = cleaned.groupby('Provider Name', dropna=False)
+
     zip_buf = BytesIO()
-    dotted = Side(style='dotted'); border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
+    dotted = Side(style='dotted')
+    border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
     font10 = Font(name="Segoe UI", size=10)
     header_font = Font(name="Segoe UI", size=12, bold=True, color="FFFFFF")
     ACC_FMT = '_-£* #,##0.00_-;_-£* -#,##0.00_-;_-£* "-"??_-;_-@_-'
 
     with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for provider, dfp in cleaned.groupby('Provider Name', dropna=False):
+        for provider, dfp in groups:
             wb = load_workbook(BytesIO(template_bytes))
-            ws = wb.active
+            ws = wb.active  # first sheet
 
             # Fixed cells
             provider_val = "" if pd.isna(provider) else str(provider)
             name_val = _sanitize_name(dfp['Name'].iloc[0] if 'Name' in dfp.columns and len(dfp) > 0 else "")
             phone_val = "" if 'Phone' not in dfp.columns else ("" if pd.isna(dfp['Phone'].iloc[0]) else str(dfp['Phone'].iloc[0]))
             email_val = "" if 'Email' not in dfp.columns else ("" if pd.isna(dfp['Email'].iloc[0]) else str(dfp['Email'].iloc[0]))
+
             ws["B7"]  = provider_val
             ws["B9"]  = name_val
             ws["G9"]  = phone_val
@@ -250,8 +305,10 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             ws["B11"] = email_val
             ws["I15"] = email_val
 
-            # Table headers
+            # Find table and headers
             hdr_row, hdr_col, hmap = _find_table_header_row(ws)
+
+            # Explicit mapping
             c_Type   = _get_col(hmap, "Type")
             c_Prod   = _get_col(hmap, "Product")
             c_Month  = _get_col(hmap, "Month", aliases=("Event Month","Month of"))
@@ -263,11 +320,15 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             c_Notes  = _get_col(hmap, "Notes")
             c_When   = _get_col(hmap, "When to Invoice", aliases=("When To Invoice","When-to-Invoice"))
 
+            # Header styling
             for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When]:
-                if c: ws.cell(hdr_row, c).font = header_font
+                if c:
+                    ws.cell(hdr_row, c).font = header_font
 
             start_row = hdr_row + 1
             n = len(dfp)
+
+            # Insert rows to match number of items
             if n > 1:
                 ws.insert_rows(start_row + 1, amount=n - 1)
 
@@ -285,11 +346,15 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 if c_Type:   ws.cell(rr, c_Type,   typ)
                 if c_Prod:   ws.cell(rr, c_Prod,   prod)
                 if c_Month:  ws.cell(rr, c_Month,  month)
-                if c_Date:   ws.cell(rr, c_Date,   None)
+                if c_Date:   ws.cell(rr, c_Date,   None)         # blank
                 if c_F2F:    ws.cell(rr, c_F2F,    f2f_val)
                 if c_Qty:    ws.cell(rr, c_Qty,    qty)
+
+                # Charge (Accounting)
                 if c_Charge:
                     ws.cell(rr, c_Charge, charge).number_format = ACC_FMT
+
+                # Total = Qty * Charge (Accounting)
                 if c_Total:
                     try:
                         total_val = (qty or 0) * (float(charge) if charge not in [None, ""] else 0.0)
@@ -300,18 +365,26 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             # Borders + body font
             last_row = start_row + max(n - 1, 0)
             table_cols = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
-            if not table_cols: table_cols = [hdr_col, hdr_col+1]
-            first_col, last_col = min(table_cols), max(table_cols)
+            if not table_cols:
+                table_cols = [hdr_col, hdr_col+1]
+            last_col = max(table_cols)
+            first_col = min(table_cols)
 
-            for c in range(first_col, last_col + 1): ws.cell(hdr_row, c).border = border
+            # Header borders
+            for c in range(first_col, last_col + 1):
+                ws.cell(hdr_row, c).border = border
+
+            # Body borders + font
             for r in range(start_row, last_row + 1):
                 for c in range(first_col, last_col + 1):
-                    cell = ws.cell(r, c); cell.border = border; cell.font = font10
+                    cell = ws.cell(r, c)
+                    cell.border = border
+                    cell.font = font10
 
-            # -------- Summary block (MERGE-SAFE) --------
+            # ---------- Summary block (merge-safe & explicit formulas) ----------
             total_col = c_Total if c_Total else c_Charge
-            ACC = ACC_FMT
             tp_coord = disc_coord = tpp_coord = vat_coord = None
+            ACC = ACC_FMT
 
             if total_col:
                 sum_rng = f"{get_column_letter(total_col)}{start_row}:{get_column_letter(total_col)}{last_row}"
@@ -320,39 +393,42 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 r_tp, c_tp = _find_label_cell(ws, "Total Package")
                 if r_tp and c_tp:
                     r_v, c_v = _value_cell_right(ws, r_tp, c_tp)
-                    cell = _write_merge_safe(ws, r_v, c_v, f"=SUM({sum_rng})", ACC)
-                    tp_coord = cell.coordinate
+                    tp_cell = _write_merge_safe(ws, r_v, c_v, f"=SUM({sum_rng})", ACC)
+                    tp_coord = tp_cell.coordinate
 
                 # Discount
                 r_d, c_d = _find_label_cell(ws, "Discount")
                 if r_d and c_d:
                     r_v, c_v = _value_cell_right(ws, r_d, c_d)
-                    cell = _write_merge_safe(ws, r_v, c_v, 0 if ws.cell(r_v, c_v).value is None else ws.cell(r_v, c_v).value, ACC)
-                    disc_coord = cell.coordinate
+                    # default 0 if empty
+                    existing = ws.cell(r_v, c_v).value
+                    disc_cell = _write_merge_safe(ws, r_v, c_v, 0 if existing is None else existing, ACC)
+                    disc_coord = disc_cell.coordinate
 
                 # Total Package Price = TP - Discount
                 r_tpp, c_tpp = _find_label_cell(ws, "Total Package Price")
                 if r_tpp and c_tpp and tp_coord and disc_coord:
                     r_v, c_v = _value_cell_right(ws, r_tpp, c_tpp)
-                    cell = _write_merge_safe(ws, r_v, c_v, f"={tp_coord}-{disc_coord}", ACC)
-                    tpp_coord = cell.coordinate
-                    tpp_row, tpp_col_idx = coordinate_to_tuple(tpp_coord)
+                    tpp_cell = _write_merge_safe(ws, r_v, c_v, f"={tp_coord}-{disc_coord}", ACC)
+                    tpp_coord = tpp_cell.coordinate
 
                 # VAT = TPP / 5
                 r_vat, c_vat = _find_label_cell(ws, "VAT")
                 if r_vat and c_vat and tpp_coord:
                     r_v, c_v = _value_cell_right(ws, r_vat, c_vat)
-                    cell = _write_merge_safe(ws, r_v, c_v, f"={tpp_coord}/5", ACC)
-                    vat_coord = cell.coordinate
+                    vat_cell = _write_merge_safe(ws, r_v, c_v, f"={tpp_coord}/5", ACC)
+                    vat_coord = vat_cell.coordinate
 
-                # Overall Package Price = SUM(TPP, VAT) — write to same column as TPP (merge-safe)
+                # Overall Package Price = Total Package Price + VAT (force SUM of the two)
                 r_opp, c_opp = _find_label_cell(ws, "Overall Package Price")
                 if r_opp and c_opp and tpp_coord and vat_coord:
-                    tpp_row, tpp_col_idx = coordinate_to_tuple(tpp_coord)
-                    # target at (r_opp, tpp_col_idx), then merge-safe write
-                    cell = _write_merge_safe(ws, r_opp, tpp_col_idx, f"=SUM({tpp_coord},{vat_coord})", ACC)
+                    r_v, c_v = _value_cell_right(ws, r_opp, c_opp)
+                    _write_merge_safe(ws, r_v, c_v, f"=SUM({tpp_coord},{vat_coord})", ACC)
 
-            out_bytes = BytesIO(); wb.save(out_bytes); out_bytes.seek(0)
+            # Save workbook into ZIP under templates/
+            out_bytes = BytesIO()
+            wb.save(out_bytes)
+            out_bytes.seek(0)
             safe_provider = re.sub(r'[^A-Za-z0-9 _.-]+', '_', provider_val or "Unknown_Provider")
             zf.writestr(f"templates/{safe_provider}.xlsx", out_bytes.getvalue())
 
@@ -385,6 +461,7 @@ if st.button("Submit"):
         st.error("Please upload both the Zoho Forms export and the MOF Cost Sheet.")
     else:
         with st.spinner("Processing..."):
+            # Read inputs
             try:
                 form_df = _read_any_table(form_file, preferred_sheet_name="Form")
             except Exception as e:
@@ -396,21 +473,27 @@ if st.button("Submit"):
                 st.exception(RuntimeError(f"Failed to read the MOF Cost Sheet: {e}"))
                 st.stop()
 
+            # Transform
             try:
                 cleaned = transform(form_df, costs_df)
             except Exception as e:
                 st.exception(e)
                 st.stop()
 
+            # Build results.zip with templates (if provided) + data/cleaned_output.xlsx
             zip_buf = BytesIO()
             with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-                cleaned_bytes = BytesIO(); cleaned.to_excel(cleaned_bytes, index=False)
+                # Add cleaned_output.xlsx
+                cleaned_bytes = BytesIO()
+                cleaned.to_excel(cleaned_bytes, index=False)
                 zf.writestr("data/cleaned_output.xlsx", cleaned_bytes.getvalue())
 
+                # Optional: templates
                 if template_file is not None:
                     try:
                         template_bytes = template_file.read()
                         tpl_zip = _populate_template_bytes(template_bytes, cleaned, costs_df)
+                        # Copy files from tpl_zip into templates/ folder in our main ZIP
                         with zipfile.ZipFile(tpl_zip, 'r') as tplzf:
                             for info in tplzf.infolist():
                                 zf.writestr(info.filename, tplzf.read(info.filename))
@@ -418,6 +501,8 @@ if st.button("Submit"):
                         st.exception(RuntimeError(f"Template population failed: {e}"))
 
             zip_buf.seek(0)
+
+            # Summary & download
             st.success(f"Done. Cleaned {len(cleaned)} rows.")
             st.dataframe(cleaned.head(100), use_container_width=True)
             missing_costs = cleaned['Cost'].isna().sum()
@@ -432,4 +517,4 @@ if st.button("Submit"):
             )
 
 st.markdown("---")
-st.caption("Summary cells are now merge-safe and Overall Package Price is always =SUM(Total Package Price, VAT) in the correct value cell.")
+st.caption("Headers: Segoe UI 12 bold white. Body: Segoe UI 10. Borders dotted across all table columns (including Notes & When to Invoice). Accounting format (GBP) for Charge, Total and summary values. Overall Package Price is explicitly set to SUM(Total Package Price, VAT).")
