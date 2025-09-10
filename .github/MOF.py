@@ -8,7 +8,7 @@ import streamlit as st
 # Excel handling / styling
 from openpyxl import load_workbook
 from openpyxl.styles import Border, Side, Font
-from openpyxl.utils import get_column_letter, coordinate_to_tuple
+from openpyxl.utils import get_column_letter
 
 # ---------------------------
 # Utilities: robust readers
@@ -44,7 +44,8 @@ def _read_any_table(uploaded_file, preferred_sheet_name=None):
 ID_COLS = ['Random ID', 'Provider Name', 'Name', 'Phone', 'Email']
 
 def _is_event_label(x):
-    if pd.isna(x): return False
+    if pd.isna(x):
+        return False
     s = str(x).strip()
     months3 = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec']
     if any(s.lower().startswith(m) for m in months3): return True
@@ -107,12 +108,14 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
 
     out = pd.DataFrame.from_records(records)
 
+    # Attach ID columns
     for c in ID_COLS:
         out[c] = out['_ridx'].map(data_rows[c]) if c in data_rows.columns else None
 
     out = out[['Random ID','Provider Name','Name','Phone','Email',
                'Type','Event Date (if applicable)','Product']]
 
+    # Join Cost
     def _norm(s): return None if pd.isna(s) else str(s).strip()
     if not set(['Type','Product','Cost']).issubset(costs_df.columns):
         raise ValueError("Cost sheet must contain columns: Type, Product, Cost")
@@ -139,36 +142,58 @@ def _sanitize_name(name: str) -> str:
     s = str(name).replace(",", " ")
     return re.sub(r"\s+", " ", s).strip()
 
+def _find_table_header_row(ws):
+    max_row = min(ws.max_row, 200)
+    max_col = min(ws.max_column, 80)
+    for r in range(1, max_row + 1):
+        row_vals = [ws.cell(r, c).value for c in range(1, max_col + 1)]
+        for c in range(1, max_col):
+            v = row_vals[c-1]
+            if v is not None and str(v).strip().lower() == "type":
+                nxt = row_vals[c] if c < max_col else None
+                if nxt is not None and str(nxt).strip().lower() == "product":
+                    hmap = {}
+                    for c2 in range(1, max_col + 1):
+                        v2 = ws.cell(r, c2).value
+                        if v2 is not None:
+                            hmap[str(v2).strip()] = c2
+                    return r, c, hmap
+    raise RuntimeError("Could not find the table header row with 'Type' and 'Product'.")
+
+def _get_col(hmap, key, aliases=()):
+    if key in hmap: return hmap[key]
+    lowered = {k.lower(): v for k, v in hmap.items()}
+    if key.lower() in lowered: return lowered[key.lower()]
+    for a in aliases:
+        if a in hmap: return hmap[a]
+        if a.lower() in lowered: return lowered[a.lower()]
+    return None
+
+# ---- NEW: column-scoped label search (column I) + value cell selection (column J) ----
+
 def _canon_label(s: str) -> str:
-    """Lowercase + remove all non-alphanumerics (handles spaces, colons, NBSPs, etc.)."""
     return re.sub(r'[^a-z0-9]+', '', str(s).lower())
 
-def _find_label_cell(ws, target_text):
-    """
-    Find cell whose *canonicalized* text contains the target's canonical form.
-    Robust to spaces, punctuation, case, NBSPs, etc.
-    """
-    tgt = _canon_label(target_text)
-    max_r = min(ws.max_row, 800)
-    max_c = min(ws.max_column, 160)
-    for rr in range(1, max_r + 1):
-        for cc in range(1, max_c + 1):
-            v = ws.cell(rr, cc).value
-            if v is None:
-                continue
-            if tgt in _canon_label(v):
-                return rr, cc
+def _find_label_in_column(ws, label_text, col_idx, row_start, row_end):
+    tgt = _canon_label(label_text)
+    row_end = min(row_end, ws.max_row)
+    for rr in range(row_start, row_end + 1):
+        v = ws.cell(rr, col_idx).value
+        if v is None:
+            continue
+        if tgt in _canon_label(v):
+            return rr, col_idx
     return None, None
 
-def _value_cell_right_nearest(ws, r, c, search_span=12):
-    """Nearest editable cell to the right of (r,c); skip literal '£' or '-' placeholders."""
-    for cc in range(c + 1, c + 1 + search_span):
-        v = ws.cell(r, cc).value
-        if isinstance(v, str) and v.strip() in {"£", "-"}:
+def _first_editable_value_cell(ws, r, c):
+    # Prefer column J (c+1); if it's a literal "£", try K
+    for cc in range(c + 1, c + 3):
+        val = ws.cell(r, cc).value
+        if isinstance(val, str) and val.strip() == "£":
             continue
-        if v is None or isinstance(v, (int, float)) or (isinstance(v, str) and v.startswith("=")):
-            return r, cc
-    return r, c + 1
+        if (val is None) or isinstance(val, (int, float)) or (isinstance(val, str) and val.startswith("=")):
+            return ws.cell(r, cc)
+    return ws.cell(r, c + 1)
 
 # ---------------------------
 # Template population
@@ -207,35 +232,8 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             ws["B11"] = email_val
             ws["I15"] = email_val
 
-            # Table headers
-            # find header row by locating "Type" then build a header map from that row
-            max_row = min(ws.max_row, 200)
-            max_col = min(ws.max_column, 80)
-            hdr_row = None; hmap = {}
-            for r in range(1, max_row + 1):
-                row_vals = [ws.cell(r, c).value for c in range(1, max_col + 1)]
-                for c in range(1, max_col):
-                    if row_vals[c-1] and str(row_vals[c-1]).strip().lower() == "type":
-                        if row_vals[c] and str(row_vals[c]).strip().lower() == "product":
-                            hdr_row = r
-                            for c2 in range(1, max_col + 1):
-                                v2 = ws.cell(r, c2).value
-                                if v2 is not None:
-                                    hmap[str(v2).strip()] = c2
-                            break
-                if hdr_row: break
-            if not hdr_row:
-                raise RuntimeError("Could not find the table header row with 'Type' and 'Product'.")
-
-            def _get_col(hmap, key, aliases=()):
-                if key in hmap: return hmap[key]
-                lowered = {k.lower(): v for k, v in hmap.items()}
-                if key.lower() in lowered: return lowered[key.lower()]
-                for a in aliases:
-                    if a in hmap: return hmap[a]
-                    if a.lower() in lowered: return lowered[a.lower()]
-                return None
-
+            # Table location
+            hdr_row, hdr_col, hmap = _find_table_header_row(ws)
             c_Type   = _get_col(hmap, "Type")
             c_Prod   = _get_col(hmap, "Product")
             c_Month  = _get_col(hmap, "Month", aliases=("Event Month","Month of"))
@@ -247,6 +245,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             c_Notes  = _get_col(hmap, "Notes")
             c_When   = _get_col(hmap, "When to Invoice", aliases=("When To Invoice","When-to-Invoice"))
 
+            # Header styling
             for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When]:
                 if c: ws.cell(hdr_row, c).font = header_font
 
@@ -284,60 +283,68 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             # Borders + body font
             last_row = start_row + max(n - 1, 0)
             table_cols = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
-            if not table_cols: table_cols = [c_Type or 1, (c_Type or 1)+1]
+            if not table_cols: table_cols = [hdr_col, hdr_col+1]
             first_col, last_col = min(table_cols), max(table_cols)
             for c in range(first_col, last_col + 1):
-                ws.cell(hdr_row, c).border = border
+                ws.cell(hdr_row, c).border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
             for r in range(start_row, last_row + 1):
                 for c in range(first_col, last_col + 1):
-                    cell = ws.cell(r, c); cell.border = border; cell.font = font10
+                    cell = ws.cell(r, c); cell.border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted); cell.font = font10
 
-            # ---------- Summary block (robust) ----------
-            total_col = c_Total if c_Total else c_Charge
+            # ---------- Summary block (column I scoped; values in column J) ----------
             ACC = ACC_FMT
-            tp_coord = disc_coord = tpp_coord = vat_coord = None
-
+            total_col = c_Total if c_Total else c_Charge
             if total_col:
                 sum_rng = f"{get_column_letter(total_col)}{start_row}:{get_column_letter(total_col)}{last_row}"
 
+                LABEL_COL = 9   # I
+                VALUE_COL = 10  # J
+                search_start = last_row + 1
+                search_end   = last_row + 200
+
                 # Total Package
-                r_tp, c_tp = _find_label_cell(ws, "Total Package")
-                if r_tp and c_tp:
-                    rtpv, ctpv = _value_cell_right_nearest(ws, r_tp, c_tp)
-                    ws.cell(rtpv, ctpv, f"=SUM({sum_rng})").number_format = ACC
-                    tp_coord = ws.cell(rtpv, ctpv).coordinate
+                r_tp, c_tp = _find_label_in_column(ws, "Total Package", LABEL_COL, search_start, search_end)
+                tp_coord = None
+                if r_tp:
+                    tp_cell = _first_editable_value_cell(ws, r_tp, c_tp)
+                    tp_cell.value = f"=SUM({sum_rng})"
+                    tp_cell.number_format = ACC
+                    tp_coord = tp_cell.coordinate
 
                 # Discount
-                r_d, c_d = _find_label_cell(ws, "Discount")
-                if r_d and c_d:
-                    rdv, cdv = _value_cell_right_nearest(ws, r_d, c_d)
-                    if ws.cell(rdv, cdv).value is None:
-                        ws.cell(rdv, cdv, 0)
-                    ws.cell(rdv, cdv).number_format = ACC
-                    disc_coord = ws.cell(rdv, cdv).coordinate
+                r_d, c_d = _find_label_in_column(ws, "Discount", LABEL_COL, search_start, search_end)
+                disc_coord = None
+                if r_d:
+                    disc_cell = _first_editable_value_cell(ws, r_d, c_d)
+                    if disc_cell.value is None:
+                        disc_cell.value = 0
+                    disc_cell.number_format = ACC
+                    disc_coord = disc_cell.coordinate
 
                 # Total Package Price = TP - Discount
-                r_tpp, c_tpp = _find_label_cell(ws, "Total Package Price")
-                if r_tpp and c_tpp and tp_coord and disc_coord:
-                    rtppv, ctppv = _value_cell_right_nearest(ws, r_tpp, c_tpp)
-                    ws.cell(rtppv, ctppv, f"={tp_coord}-{disc_coord}").number_format = ACC
-                    tpp_coord = ws.cell(rtppv, ctppv).coordinate
+                r_tpp, c_tpp = _find_label_in_column(ws, "Total Package Price", LABEL_COL, search_start, search_end)
+                tpp_coord = None
+                if r_tpp and tp_coord and disc_coord:
+                    tpp_cell = _first_editable_value_cell(ws, r_tpp, c_tpp)
+                    tpp_cell.value = f"={tp_coord}-{disc_coord}"
+                    tpp_cell.number_format = ACC
+                    tpp_coord = tpp_cell.coordinate
 
                 # VAT = TPP / 5
-                r_vat, c_vat = _find_label_cell(ws, "VAT")
-                if r_vat and c_vat and tpp_coord:
-                    rvatv, cvatv = _value_cell_right_nearest(ws, r_vat, c_vat)
-                    ws.cell(rvatv, cvatv, f"={tpp_coord}/5").number_format = ACC
-                    vat_coord = ws.cell(rvatv, cvatv).coordinate
+                r_vat, c_vat = _find_label_in_column(ws, "VAT", LABEL_COL, search_start, search_end)
+                vat_coord = None
+                if r_vat and tpp_coord:
+                    vat_cell = _first_editable_value_cell(ws, r_vat, c_vat)
+                    vat_cell.value = f"={tpp_coord}/5"
+                    vat_cell.number_format = ACC
+                    vat_coord = vat_cell.coordinate
 
-                # Overall Package Price = TPP + VAT (FINAL step; uses *current* TPP/VAT coords)
-                r_opp, c_opp = _find_label_cell(ws, "Overall Package Price")
-                if r_opp and c_opp and tpp_coord and vat_coord:
-                    roppv, coppv = _value_cell_right_nearest(ws, r_opp, c_opp)
-                    cell = ws.cell(roppv, coppv)
-                    cell.value = None  # clear any legacy like =J27+J29
-                    cell.value = f"={tpp_coord}+{vat_coord}"
-                    cell.number_format = ACC
+                # Overall Package Price = TPP + VAT  (force value into column J on the OPP row)
+                r_opp, c_opp = _find_label_in_column(ws, "Overall Package Price", LABEL_COL, search_start, search_end)
+                if r_opp and tpp_coord and vat_coord:
+                    opp_cell = ws.cell(r_opp, VALUE_COL)
+                    opp_cell.value = f"={tpp_coord}+{vat_coord}"
+                    opp_cell.number_format = ACC
 
             # Save workbook into ZIP
             out_bytes = BytesIO(); wb.save(out_bytes); out_bytes.seek(0)
@@ -421,4 +428,4 @@ if st.button("Submit"):
             )
 
 st.markdown("---")
-st.caption("OPP now searches for the label by canonical text and writes `=<TPP>+<VAT>` into the nearest value cell to the right, after all rows are inserted.")
+st.caption("Summary labels are matched only in column I below the table; values are written in column J. OPP is always set to (TPP + VAT).")
