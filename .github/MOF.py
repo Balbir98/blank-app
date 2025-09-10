@@ -13,7 +13,6 @@ from openpyxl.utils import get_column_letter
 # ---------------------------
 # Utilities: robust readers
 # ---------------------------
-
 def _read_any_table(uploaded_file, preferred_sheet_name=None):
     name = uploaded_file.name.lower()
     ext = os.path.splitext(name)[1]
@@ -40,7 +39,6 @@ def _read_any_table(uploaded_file, preferred_sheet_name=None):
 # ---------------------------
 # Transformation Logic
 # ---------------------------
-
 ID_COLS = ['Random ID', 'Provider Name', 'Name', 'Phone', 'Email']
 
 def _is_event_label(x):
@@ -49,13 +47,15 @@ def _is_event_label(x):
     s = str(x).strip()
     months3 = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec']
     if any(s.lower().startswith(m) for m in months3): return True
-    if s in ['Q1','Q2','Q3','Monthly','Quarterly']: return True
+    if s in ['Q1','Q2','Q3','Q4','Monthly','Quarterly']: return True
     if re.search(r'\d', s): return True
     return False
 
 def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Convert Zoho's wide export to normalized rows and join Cost (+ F2F/Online when present) from MOF sheet.
+    Convert Zoho's wide export to normalized rows and join:
+    - Cost (required) and
+    - F2F or Online? (optional, if present in MOF sheet)
     """
     if form_df.shape[0] < 2:
         return pd.DataFrame(columns=[
@@ -130,7 +130,6 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     out['Type_norm'] = out['Type'].apply(_norm)
     out['Product_norm'] = out['Product'].apply(_norm)
 
-    # pick columns from cost sheet
     bring_cols = ['Type_norm','Product_norm','Cost']
     f2f_col_name = None
     for cand in ['F2F or Online?', 'F2F or Online', 'F2F/Online']:
@@ -142,7 +141,7 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     out = out.merge(costs2[bring_cols], on=['Type_norm','Product_norm'], how='left') \
              .drop(columns=['Type_norm','Product_norm'])
 
-    # Arrange final columns
+    # Arrange final columns: F2F right after Cost (if present)
     base_cols = ['Random ID','Provider Name','Name','Phone','Email',
                  'Type','Event Date (if applicable)','Product','Cost']
     if f2f_col_name:
@@ -151,16 +150,12 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
 
     out = out.reindex(columns=[c for c in base_cols if c in out.columns])
 
-    sort_cols = [c for c in ['Random ID','Type','Event Date (if applicable)','Product'] if c in out.columns]
-    if sort_cols:
-        out = out.sort_values(sort_cols).reset_index(drop=True)
-
+    out = out.sort_values(['Random ID','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
     return out
 
 # ---------------------------
 # Template helpers
 # ---------------------------
-
 def _sanitize_name(name: str) -> str:
     if pd.isna(name): return ""
     s = str(name).replace(",", " ")
@@ -220,9 +215,8 @@ def _first_value_cell_right(ws, r, c, try_two=True):
 # ---------------------------
 # Template population
 # ---------------------------
-
 def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame) -> BytesIO:
-    # Optional F2F mapping (used to fill the table column in the template)
+    # Optional F2F mapping
     f2f_map = {}
     if 'F2F or Online?' in costs_df.columns:
         def _n(s): return None if pd.isna(s) else str(s).strip()
@@ -307,73 +301,87 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             table_cols = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
             if not table_cols: table_cols = [hdr_col, hdr_col+1]
             first_col, last_col = min(table_cols), max(table_cols)
-            dotted = Side(style='dotted')
-            border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
             for c in range(first_col, last_col + 1):
-                ws.cell(hdr_row, c).border = border
+                ws.cell(hdr_row, c).border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
             for r in range(start_row, last_row + 1):
                 for c in range(first_col, last_col + 1):
                     cell = ws.cell(r, c)
-                    cell.border = border
+                    cell.border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
                     cell.font = font10
 
-            # ---------- Summary block (column I scoped; values in column J) ----------
+            # ---------- Summary block (robust; label col auto-detected; OPP forced) ----------
             ACC = ACC_FMT
             total_col = c_Total if c_Total else c_Charge
             if total_col:
                 sum_rng = f"{get_column_letter(total_col)}{start_row}:{get_column_letter(total_col)}{last_row}"
 
-                LABEL_COL = 9   # I
-                VALUE_COL = 10  # J
+                # Find the label column from "Total Package"
+                label_col = None
+                for c in range(1, ws.max_column + 1):
+                    for rr in range(last_row + 1, min(ws.max_row, last_row + 200) + 1):
+                        v = ws.cell(rr, c).value
+                        if v and _canon_label(v) == _canon_label("Total Package"):
+                            label_col = c
+                            break
+                    if label_col:
+                        break
+                if not label_col:
+                    label_col = 9  # fallback to I
+
+                value_col = label_col + 1
                 search_start = last_row + 1
-                search_end   = last_row + 200
+                search_end   = min(ws.max_row, last_row + 200)
 
                 # Total Package
-                r_tp, c_tp = _find_label_in_column(ws, "Total Package", LABEL_COL, search_start, search_end)
+                r_tp, _ = _find_label_in_column(ws, "Total Package", label_col, search_start, search_end)
                 tp_coord = None
                 if r_tp:
-                    tp_cell = _first_value_cell_right(ws, r_tp, c_tp)
+                    tp_cell = _first_value_cell_right(ws, r_tp, label_col)
                     tp_cell.value = f"=SUM({sum_rng})"
                     tp_cell.number_format = ACC
                     tp_coord = tp_cell.coordinate
 
                 # Discount
-                r_d, c_d = _find_label_in_column(ws, "Discount", LABEL_COL, search_start, search_end)
+                r_disc, _ = _find_label_in_column(ws, "Discount", label_col, search_start, search_end)
                 disc_coord = None
-                if r_d:
-                    disc_cell = _first_value_cell_right(ws, r_d, c_d)
+                if r_disc:
+                    disc_cell = _first_value_cell_right(ws, r_disc, label_col)
                     if disc_cell.value is None:
                         disc_cell.value = 0
                     disc_cell.number_format = ACC
                     disc_coord = disc_cell.coordinate
 
                 # Total Package Price = TP - Discount
-                r_tpp, c_tpp = _find_label_in_column(ws, "Total Package Price", LABEL_COL, search_start, search_end)
+                r_tpp, _ = _find_label_in_column(ws, "Total Package Price", label_col, search_start, search_end)
                 tpp_coord = None
                 if r_tpp and tp_coord and disc_coord:
-                    tpp_cell = _first_value_cell_right(ws, r_tpp, c_tpp)
+                    tpp_cell = _first_value_cell_right(ws, r_tpp, label_col)
                     tpp_cell.value = f"={tp_coord}-{disc_coord}"
                     tpp_cell.number_format = ACC
                     tpp_coord = tpp_cell.coordinate
 
                 # VAT = TPP / 5
-                r_vat, c_vat = _find_label_in_column(ws, "VAT", LABEL_COL, search_start, search_end)
+                r_vat, _ = _find_label_in_column(ws, "VAT", label_col, search_start, search_end)
                 vat_coord = None
                 if r_vat and tpp_coord:
-                    vat_cell = _first_value_cell_right(ws, r_vat, c_vat)
+                    vat_cell = _first_value_cell_right(ws, r_vat, label_col)
                     vat_cell.value = f"={tpp_coord}/5"
                     vat_cell.number_format = ACC
                     vat_coord = vat_cell.coordinate
 
-                # Overall Package Price = TPP + VAT
-                r_opp, c_opp = _find_label_in_column(ws, "Overall Package Price", LABEL_COL, search_start, search_end)
+                # OPP row: try to locate by label; if not found, place 2 rows beneath VAT
+                r_opp, _ = _find_label_in_column(ws, "Overall Package Price", label_col, search_start, search_end)
+                if not r_opp and r_vat:
+                    r_opp = r_vat + 2  # sensible fallback that matches your layout
                 if r_opp and tpp_coord and vat_coord:
-                    opp_cell = ws.cell(r_opp, VALUE_COL)  # force J on that row
+                    opp_cell = ws.cell(r_opp, value_col)
                     opp_cell.value = f"={tpp_coord}+{vat_coord}"
                     opp_cell.number_format = ACC
 
             # Save workbook into ZIP
-            out_bytes = BytesIO(); wb.save(out_bytes); out_bytes.seek(0)
+            out_bytes = BytesIO()
+            wb.save(out_bytes)
+            out_bytes.seek(0)
             safe_provider = re.sub(r'[^A-Za-z0-9 _.-]+', '_', provider_val or "Unknown_Provider")
             zf.writestr(f"templates/{safe_provider}.xlsx", out_bytes.getvalue())
 
@@ -383,14 +391,13 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
 # ---------------------------
 # Streamlit App
 # ---------------------------
-
 st.set_page_config(page_title="Zoho Forms → Cleaned Output + Templates", layout="wide")
 st.title("Zoho Forms → Cleaned Output + Populated Templates")
 
 st.markdown("""
 Upload your files and click **Submit** to get a ZIP containing:
 - **templates/** → one populated workbook **per Provider Name**  
-- **data/cleaned_output.xlsx** → your single cleaned dataset (now includes **F2F or Online?**)
+- **data/cleaned_output.xlsx** → your single cleaned dataset (now includes **F2F or Online?** when present)
 """)
 
 c1, c2, c3 = st.columns(3)
@@ -416,7 +423,6 @@ if st.button("Submit"):
             except Exception as e:
                 st.exception(RuntimeError(f"Failed to read the MOF Cost Sheet: {e}"))
                 st.stop()
-
             try:
                 cleaned = transform(form_df, costs_df)
             except Exception as e:
@@ -425,10 +431,12 @@ if st.button("Submit"):
 
             zip_buf = BytesIO()
             with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                # cleaned data
                 cleaned_bytes = BytesIO()
                 cleaned.to_excel(cleaned_bytes, index=False)
                 zf.writestr("data/cleaned_output.xlsx", cleaned_bytes.getvalue())
 
+                # templates
                 if template_file is not None:
                     try:
                         template_bytes = template_file.read()
@@ -454,4 +462,4 @@ if st.button("Submit"):
             )
 
 st.markdown("---")
-st.caption("Clean data now includes 'F2F or Online?' (from MOF). Templates still populate table + summary with robust formulas.")
+st.caption("OPP still uses dynamic label detection and is set to TPP + VAT. Clean data now includes 'F2F or Online?' when available.")
