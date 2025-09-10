@@ -183,20 +183,17 @@ def _find_label_cell(ws, label_text):
                 return rr, cc
     return None, None
 
-def _value_cell_right_nearest(ws, r, c, search_span=8):
+def _value_cell_right_nearest(ws, r, c, search_span=10):
     """
-    Pick the **nearest** valid value cell to the right of a label.
-    Skip the literal currency cell ('£') and dashed placeholders.
+    Pick the nearest valid value cell to the right of a label.
+    Skips the literal '£' cell and '-' placeholders.
     """
     for cc in range(c + 1, c + 1 + search_span):
         v = ws.cell(r, cc).value
-        # skip currency symbol and dash placeholders
         if isinstance(v, str) and v.strip() in {"£", "-"}:
             continue
-        # first blank, numeric, or formula cell is our target (nearest to label)
         if v is None or isinstance(v, (int, float)) or (isinstance(v, str) and v.startswith("=")):
             return r, cc
-    # fallback: the very next cell
     return r, c + 1
 
 # ---------------------------
@@ -295,10 +292,9 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     cell.border = border
                     cell.font = font10
 
-            # ---------- Summary block (NEAREST value cell logic) ----------
+            # ---------- Summary block ----------
             total_col = c_Total if c_Total else c_Charge
             ACC = ACC_FMT
-            tp_coord = disc_coord = tpp_coord = vat_coord = None
 
             if total_col:
                 sum_rng = f"{get_column_letter(total_col)}{start_row}:{get_column_letter(total_col)}{last_row}"
@@ -306,42 +302,62 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 # Total Package
                 r_tp, c_tp = _find_label_cell(ws, "Total Package")
                 if r_tp and c_tp:
-                    rv, cv = _value_cell_right_nearest(ws, r_tp, c_tp, search_span=10)
+                    rv, cv = _value_cell_right_nearest(ws, r_tp, c_tp)
                     ws.cell(rv, cv, f"=SUM({sum_rng})").number_format = ACC
                     tp_coord = ws.cell(rv, cv).coordinate
+                else:
+                    tp_coord = None
 
                 # Discount
                 r_d, c_d = _find_label_cell(ws, "Discount")
                 if r_d and c_d:
-                    rv, cv = _value_cell_right_nearest(ws, r_d, c_d, search_span=10)
+                    rv, cv = _value_cell_right_nearest(ws, r_d, c_d)
                     if ws.cell(rv, cv).value is None:
-                        ws.cell(rv, cv, 0).number_format = ACC
-                    else:
-                        ws.cell(rv, cv).number_format = ACC
+                        ws.cell(rv, cv, 0)
+                    ws.cell(rv, cv).number_format = ACC
                     disc_coord = ws.cell(rv, cv).coordinate
+                else:
+                    disc_coord = None
 
                 # Total Package Price = TP - Discount
                 r_tpp, c_tpp = _find_label_cell(ws, "Total Package Price")
                 if r_tpp and c_tpp and tp_coord and disc_coord:
-                    rv, cv = _value_cell_right_nearest(ws, r_tpp, c_tpp, search_span=10)
+                    rv, cv = _value_cell_right_nearest(ws, r_tpp, c_tpp)
                     ws.cell(rv, cv, f"={tp_coord}-{disc_coord}").number_format = ACC
                     tpp_coord = ws.cell(rv, cv).coordinate
+                else:
+                    tpp_coord = None
 
                 # VAT = TPP / 5
                 r_vat, c_vat = _find_label_cell(ws, "VAT")
                 if r_vat and c_vat and tpp_coord:
-                    rv, cv = _value_cell_right_nearest(ws, r_vat, c_vat, search_span=10)
+                    rv, cv = _value_cell_right_nearest(ws, r_vat, c_vat)
                     ws.cell(rv, cv, f"={tpp_coord}/5").number_format = ACC
                     vat_coord = ws.cell(rv, cv).coordinate
+                else:
+                    vat_coord = None
 
-                # Overall Package Price = TPP + VAT
+                # Overall Package Price (label-driven, moves with data):
+                # Use the SAME value column as the OPP row, and the label column of that row.
                 r_opp, c_opp = _find_label_cell(ws, "Overall Package Price")
-                if r_opp and c_opp and tpp_coord and vat_coord:
-                    rv, cv = _value_cell_right_nearest(ws, r_opp, c_opp, search_span=10)
-                    ws.cell(rv, cv, f"={tpp_coord}+{vat_coord}").number_format = ACC
+                if r_opp and c_opp:
+                    rv_opp, cv_opp = _value_cell_right_nearest(ws, r_opp, c_opp)  # e.g., I -> J
+                    val_col_letter = get_column_letter(cv_opp)                   # J (or whatever it is)
+                    label_col_letter = get_column_letter(c_opp)                  # I (labels column)
+
+                    # OPP = value at row 'Total Package Price' + value at row 'VAT'
+                    opp_formula = (
+                        f"=INDEX(${val_col_letter}:${val_col_letter},"
+                        f" MATCH(\"Total Package Price*\", ${label_col_letter}:${label_col_letter}, 0))"
+                        f"+INDEX(${val_col_letter}:${val_col_letter},"
+                        f" MATCH(\"VAT*\", ${label_col_letter}:${label_col_letter}, 0))"
+                    )
+                    ws.cell(rv_opp, cv_opp, opp_formula).number_format = ACC
 
             # Save workbook into ZIP
-            out_bytes = BytesIO(); wb.save(out_bytes); out_bytes.seek(0)
+            out_bytes = BytesIO()
+            wb.save(out_bytes)
+            out_bytes.seek(0)
             safe_provider = re.sub(r'[^A-Za-z0-9 _.-]+', '_', provider_val or "Unknown_Provider")
             zf.writestr(f"templates/{safe_provider}.xlsx", out_bytes.getvalue())
 
@@ -422,4 +438,4 @@ if st.button("Submit"):
             )
 
 st.markdown("---")
-st.caption("Summary cells use the **nearest** editable value cell to the right of the label (e.g., I31 → J31). Overall Package Price is always `=TPP + VAT`.")
+st.caption("OPP now uses label-driven lookup so it always equals Total Package Price + VAT in the same value column (e.g., I→J) and moves with inserted rows.")
