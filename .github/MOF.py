@@ -108,14 +108,12 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
 
     out = pd.DataFrame.from_records(records)
 
-    # Attach ID columns
     for c in ID_COLS:
         out[c] = out['_ridx'].map(data_rows[c]) if c in data_rows.columns else None
 
     out = out[['Random ID','Provider Name','Name','Phone','Email',
                'Type','Event Date (if applicable)','Product']]
 
-    # Join Cost
     def _norm(s): return None if pd.isna(s) else str(s).strip()
     if not set(['Type','Product','Cost']).issubset(costs_df.columns):
         raise ValueError("Cost sheet must contain columns: Type, Product, Cost")
@@ -169,12 +167,11 @@ def _get_col(hmap, key, aliases=()):
         if a.lower() in lowered: return lowered[a.lower()]
     return None
 
-# ---- NEW: column-scoped label search (column I) + value cell selection (column J) ----
-
 def _canon_label(s: str) -> str:
     return re.sub(r'[^a-z0-9]+', '', str(s).lower())
 
 def _find_label_in_column(ws, label_text, col_idx, row_start, row_end):
+    """Search a bounded range in a specific label column (e.g. I)."""
     tgt = _canon_label(label_text)
     row_end = min(row_end, ws.max_row)
     for rr in range(row_start, row_end + 1):
@@ -185,14 +182,13 @@ def _find_label_in_column(ws, label_text, col_idx, row_start, row_end):
             return rr, col_idx
     return None, None
 
-def _first_editable_value_cell(ws, r, c):
-    # Prefer column J (c+1); if it's a literal "£", try K
-    for cc in range(c + 1, c + 3):
-        val = ws.cell(r, cc).value
-        if isinstance(val, str) and val.strip() == "£":
+def _first_value_cell_right(ws, r, c, try_two=True):
+    """Prefer the cell to the right (value col). If it's a literal '£', skip to next."""
+    for cc in [c + 1, c + 2] if try_two else [c + 1]:
+        v = ws.cell(r, cc).value
+        if isinstance(v, str) and v.strip() == "£":
             continue
-        if (val is None) or isinstance(val, (int, float)) or (isinstance(val, str) and val.startswith("=")):
-            return ws.cell(r, cc)
+        return ws.cell(r, cc)
     return ws.cell(r, c + 1)
 
 # ---------------------------
@@ -289,65 +285,85 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 ws.cell(hdr_row, c).border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
             for r in range(start_row, last_row + 1):
                 for c in range(first_col, last_col + 1):
-                    cell = ws.cell(r, c); cell.border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted); cell.font = font10
+                    cell = ws.cell(r, c)
+                    cell.border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
+                    cell.font = font10
 
-            # ---------- Summary block (column I scoped; values in column J) ----------
+            # ---------- Summary block (robust; label col auto-detected; OPP forced) ----------
             ACC = ACC_FMT
             total_col = c_Total if c_Total else c_Charge
             if total_col:
                 sum_rng = f"{get_column_letter(total_col)}{start_row}:{get_column_letter(total_col)}{last_row}"
 
-                LABEL_COL = 9   # I
-                VALUE_COL = 10  # J
+                # Find the label column from "Total Package"
+                label_col = None
+                for c in range(1, ws.max_column + 1):
+                    for rr in range(last_row + 1, min(ws.max_row, last_row + 200) + 1):
+                        v = ws.cell(rr, c).value
+                        if v and _canon_label(v) == _canon_label("Total Package"):
+                            label_col = c
+                            break
+                    if label_col:
+                        break
+                if not label_col:
+                    label_col = 9  # fallback to I
+
+                value_col = label_col + 1
+
                 search_start = last_row + 1
-                search_end   = last_row + 200
+                search_end   = min(ws.max_row, last_row + 200)
 
                 # Total Package
-                r_tp, c_tp = _find_label_in_column(ws, "Total Package", LABEL_COL, search_start, search_end)
+                r_tp, _ = _find_label_in_column(ws, "Total Package", label_col, search_start, search_end)
                 tp_coord = None
                 if r_tp:
-                    tp_cell = _first_editable_value_cell(ws, r_tp, c_tp)
+                    tp_cell = _first_value_cell_right(ws, r_tp, label_col)
                     tp_cell.value = f"=SUM({sum_rng})"
                     tp_cell.number_format = ACC
                     tp_coord = tp_cell.coordinate
 
                 # Discount
-                r_d, c_d = _find_label_in_column(ws, "Discount", LABEL_COL, search_start, search_end)
+                r_disc, _ = _find_label_in_column(ws, "Discount", label_col, search_start, search_end)
                 disc_coord = None
-                if r_d:
-                    disc_cell = _first_editable_value_cell(ws, r_d, c_d)
+                if r_disc:
+                    disc_cell = _first_value_cell_right(ws, r_disc, label_col)
                     if disc_cell.value is None:
                         disc_cell.value = 0
                     disc_cell.number_format = ACC
                     disc_coord = disc_cell.coordinate
 
                 # Total Package Price = TP - Discount
-                r_tpp, c_tpp = _find_label_in_column(ws, "Total Package Price", LABEL_COL, search_start, search_end)
+                r_tpp, _ = _find_label_in_column(ws, "Total Package Price", label_col, search_start, search_end)
                 tpp_coord = None
                 if r_tpp and tp_coord and disc_coord:
-                    tpp_cell = _first_editable_value_cell(ws, r_tpp, c_tpp)
+                    tpp_cell = _first_value_cell_right(ws, r_tpp, label_col)
                     tpp_cell.value = f"={tp_coord}-{disc_coord}"
                     tpp_cell.number_format = ACC
                     tpp_coord = tpp_cell.coordinate
 
                 # VAT = TPP / 5
-                r_vat, c_vat = _find_label_in_column(ws, "VAT", LABEL_COL, search_start, search_end)
+                r_vat, _ = _find_label_in_column(ws, "VAT", label_col, search_start, search_end)
                 vat_coord = None
                 if r_vat and tpp_coord:
-                    vat_cell = _first_editable_value_cell(ws, r_vat, c_vat)
+                    vat_cell = _first_value_cell_right(ws, r_vat, label_col)
                     vat_cell.value = f"={tpp_coord}/5"
                     vat_cell.number_format = ACC
                     vat_coord = vat_cell.coordinate
 
-                # Overall Package Price = TPP + VAT  (force value into column J on the OPP row)
-                r_opp, c_opp = _find_label_in_column(ws, "Overall Package Price", LABEL_COL, search_start, search_end)
+                # OPP row: try to locate by label; if not found, place 2 rows beneath VAT
+                r_opp, _ = _find_label_in_column(ws, "Overall Package Price", label_col, search_start, search_end)
+                if not r_opp and r_vat:
+                    r_opp = r_vat + 2  # sensible fallback that matches your layout
+
                 if r_opp and tpp_coord and vat_coord:
-                    opp_cell = ws.cell(r_opp, VALUE_COL)
+                    opp_cell = ws.cell(r_opp, value_col)
                     opp_cell.value = f"={tpp_coord}+{vat_coord}"
                     opp_cell.number_format = ACC
 
             # Save workbook into ZIP
-            out_bytes = BytesIO(); wb.save(out_bytes); out_bytes.seek(0)
+            out_bytes = BytesIO()
+            wb.save(out_bytes)
+            out_bytes.seek(0)
             safe_provider = re.sub(r'[^A-Za-z0-9 _.-]+', '_', provider_val or "Unknown_Provider")
             zf.writestr(f"templates/{safe_provider}.xlsx", out_bytes.getvalue())
 
@@ -428,4 +444,4 @@ if st.button("Submit"):
             )
 
 st.markdown("---")
-st.caption("Summary labels are matched only in column I below the table; values are written in column J. OPP is always set to (TPP + VAT).")
+st.caption("OPP is now written in the detected summary column (label col) + 1, on the correct row, with a fallback below VAT.")
