@@ -56,13 +56,14 @@ def _is_event_label(x):
         return True
     if s in ['Q1','Q2','Q3','Q4','Monthly','Quarterly']:
         return True
-    if re.search(r'\d', s):
+    if re.search(r'\d', s):  # e.g., "4th February - Midlands"
         return True
     return False
 
 def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     """
     Convert Zoho's wide export to normalized rows and join Cost from MOF sheet.
+    - “Option” rule is applied for both named and unnamed columns.
     """
     if form_df.shape[0] < 2:
         return pd.DataFrame(columns=[
@@ -88,6 +89,7 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
             text_val = str(val).strip()
 
             if not str(col).startswith('Unnamed'):
+                # Named column: apply Option rule too (bug fix)
                 if col in ID_COLS or col in ['Added Time', 'Referrer Name', 'Task Owner']:
                     continue
                 if re.search(r'\boption(s)?\b', text_val, flags=re.I) and not pd.isna(sub):
@@ -101,6 +103,7 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
                 records.append({'_ridx': ridx, 'Type': current_type,
                                 'Event Date (if applicable)': evt, 'Product': prod})
             else:
+                # Unnamed column path
                 if re.search(r'\boption(s)?\b', text_val, flags=re.I):
                     prod = str(sub).strip() if not pd.isna(sub) else text_val
                     evt = None
@@ -148,35 +151,17 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------
 
 def _sanitize_name(name: str) -> str:
+    """Remove commas and extra whitespace."""
     if pd.isna(name):
         return ""
     s = str(name).replace(",", " ")
     return re.sub(r"\s+", " ", s).strip()
 
-def _norm_label_text(s: str) -> str:
-    """Lowercase, strip, remove trailing ':' and collapse spaces."""
-    s = re.sub(r'[:\u00A0]+$', '', str(s))  # strip colons / NBSP at end
-    s = re.sub(r'\s+', ' ', s).strip().lower()
-    return s
-
-def _label_matches(cell_value, target: str) -> bool:
-    """Case/colon/space-insensitive startswith match for labels."""
-    if cell_value is None:
-        return False
-    return _norm_label_text(cell_value).startswith(_norm_label_text(target))
-
-def _find_label_cell(ws, label_text):
-    """Find the row/col of a label (forgiving match)."""
-    max_r = min(ws.max_row, 600)
-    max_c = min(ws.max_column, 120)
-    for rr in range(1, max_r + 1):
-        for cc in range(1, max_c + 1):
-            if _label_matches(ws.cell(rr, cc).value, label_text):
-                return rr, cc
-    return None, None
-
 def _find_table_header_row(ws):
-    """Locate table header row containing 'Type' and 'Product'."""
+    """
+    Find a row containing 'Type' and 'Product'.
+    Return (header_row_index, header_col_index, header_map[original header text -> col]).
+    """
     max_row = min(ws.max_row, 200)
     max_col = min(ws.max_column, 80)
     for r in range(1, max_row + 1):
@@ -186,17 +171,19 @@ def _find_table_header_row(ws):
             if v is not None and str(v).strip().lower() == "type":
                 nxt = row_vals[c] if c < max_col else None
                 if nxt is not None and str(nxt).strip().lower() == "product":
-                    # Build header map
+                    # Build header map from this row
                     hmap = {}
                     for c2 in range(1, max_col + 1):
                         v2 = ws.cell(r, c2).value
                         if v2 is None:
                             continue
-                        hmap[str(v2).strip()] = c2
+                        key = str(v2).strip()
+                        hmap[key] = c2
                     return r, c, hmap
     raise RuntimeError("Could not find the table header row with 'Type' and 'Product'.")
 
 def _get_col(hmap, key, aliases=()):
+    """Find a column by exact header or any alias (case-insensitive)."""
     if key in hmap:
         return hmap[key]
     lowered = {k.lower(): v for k, v in hmap.items()}
@@ -209,40 +196,72 @@ def _get_col(hmap, key, aliases=()):
             return lowered[a.lower()]
     return None
 
-def _value_cell_right_nearest(ws, r, c, search_span=10):
+# -------- NEW: label/value helpers for summary rows --------
+
+def _label_cell(ws, label_text):
     """
-    Pick the nearest valid value cell to the right of a label.
-    Skip literal '£' or '-' placeholders.
+    Find (row, col) of the label cell using forgiving match (case/colon/spacing).
+    Searches the whole sheet (reasonable caps applied).
     """
-    for cc in range(c + 1, c + 1 + search_span):
+    target = re.sub(r'[:\u00A0]+$', '', str(label_text)).strip().lower()
+    max_r = min(ws.max_row, 800)
+    max_c = min(ws.max_column, 120)
+    for rr in range(1, max_r + 1):
+        for cc in range(1, max_c + 1):
+            v = ws.cell(rr, cc).value
+            if v is None:
+                continue
+            s = re.sub(r'[:\u00A0]+$', '', str(v)).strip().lower()
+            if s == target:
+                return rr, cc
+    return None, None
+
+def _value_cell_right(ws, r, c, span=10):
+    """
+    Return the FIRST editable value cell to the right of (r,c),
+    skipping literal '£' or '-' placeholders.
+    This lands you in the visible value column (e.g., J).
+    """
+    for cc in range(c + 1, c + 1 + span):
         v = ws.cell(r, cc).value
         if isinstance(v, str) and v.strip() in {"£", "-"}:
             continue
-        # take the first editable (blank, numeric, or formula) cell
         if v is None or isinstance(v, (int, float)) or (isinstance(v, str) and v.startswith("=")):
-            return r, cc
-    return r, c + 1
-
-def _clear_then_set(ws, r, c, value, number_format=None):
-    cell = ws.cell(r, c)
-    cell.value = None  # clear any sticky old formula like =J27+J29
-    cell.value = value
-    if number_format:
-        cell.number_format = number_format
-    return cell
+            return ws.cell(r, cc)
+    return ws.cell(r, c + 1)
 
 # ---------------------------
 # Template population
 # ---------------------------
 
 def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame) -> BytesIO:
-    # Optional F2F mapping
+    """
+    Returns a ZIP containing one populated template per Provider.
+    - Fixed cells:
+        B7 = Provider Name
+        B9 = Main contact (Name sans comma)
+        G9 = Phone
+        I9, B11, I15 = Email
+    - Table rows filled and styled; Total = Qty * Charge.
+    - Borders apply through 'Notes' and 'When to Invoice' if present.
+    - Headers styled: Segoe UI 12 bold white.
+    - Charge & Total cells formatted as Accounting (GBP).
+    - Summary block:
+        * Total Package = SUM(Total column)
+        * Discount = (leave as is or 0 if empty)
+        * Total Package Price = Total Package - Discount
+        * VAT = Total Package Price / 5
+        * Overall Package Price = Total Package Price + VAT  <-- now forced with helpers
+    """
+    # Optional F2F mapping from cost sheet
     f2f_map = {}
     if 'F2F or Online?' in costs_df.columns:
         def _n(s): return None if pd.isna(s) else str(s).strip()
         tmp = costs_df[['Product','F2F or Online?']].copy()
         tmp['Product_norm'] = tmp['Product'].apply(_n)
         f2f_map = dict(zip(tmp['Product_norm'], tmp['F2F or Online?']))
+
+    groups = cleaned.groupby('Provider Name', dropna=False)
 
     zip_buf = BytesIO()
     dotted = Side(style='dotted')
@@ -252,15 +271,16 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
     ACC_FMT = '_-£* #,##0.00_-;_-£* -#,##0.00_-;_-£* "-"??_-;_-@_-'
 
     with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for provider, dfp in cleaned.groupby('Provider Name', dropna=False):
+        for provider, dfp in groups:
             wb = load_workbook(BytesIO(template_bytes))
-            ws = wb.active
+            ws = wb.active  # first sheet
 
-            # Fixed fields
+            # Fixed cells
             provider_val = "" if pd.isna(provider) else str(provider)
             name_val = _sanitize_name(dfp['Name'].iloc[0] if 'Name' in dfp.columns and len(dfp) > 0 else "")
             phone_val = "" if 'Phone' not in dfp.columns else ("" if pd.isna(dfp['Phone'].iloc[0]) else str(dfp['Phone'].iloc[0]))
             email_val = "" if 'Email' not in dfp.columns else ("" if pd.isna(dfp['Email'].iloc[0]) else str(dfp['Email'].iloc[0]))
+
             ws["B7"]  = provider_val
             ws["B9"]  = name_val
             ws["G9"]  = phone_val
@@ -268,8 +288,9 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             ws["B11"] = email_val
             ws["I15"] = email_val
 
-            # Table location
+            # Find table and headers
             hdr_row, hdr_col, hmap = _find_table_header_row(ws)
+
             c_Type   = _get_col(hmap, "Type")
             c_Prod   = _get_col(hmap, "Product")
             c_Month  = _get_col(hmap, "Month", aliases=("Event Month","Month of"))
@@ -281,7 +302,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             c_Notes  = _get_col(hmap, "Notes")
             c_When   = _get_col(hmap, "When to Invoice", aliases=("When To Invoice","When-to-Invoice"))
 
-            # Style headers
+            # Header styling (font only; template handles fill color)
             for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When]:
                 if c:
                     ws.cell(hdr_row, c).font = header_font
@@ -289,11 +310,11 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             start_row = hdr_row + 1
             n = len(dfp)
 
-            # Insert rows for data
+            # Insert rows to match number of items
             if n > 1:
                 ws.insert_rows(start_row + 1, amount=n - 1)
 
-            # Fill rows
+            # Write only to mapped columns
             for i, (_, r) in enumerate(dfp.iterrows()):
                 rr = start_row + i
                 typ   = r.get("Type", "")
@@ -307,85 +328,95 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 if c_Type:   ws.cell(rr, c_Type,   typ)
                 if c_Prod:   ws.cell(rr, c_Prod,   prod)
                 if c_Month:  ws.cell(rr, c_Month,  month)
-                if c_Date:   ws.cell(rr, c_Date,   None)
+                if c_Date:   ws.cell(rr, c_Date,   None)         # blank
                 if c_F2F:    ws.cell(rr, c_F2F,    f2f_val)
                 if c_Qty:    ws.cell(rr, c_Qty,    qty)
-                if c_Charge: ws.cell(rr, c_Charge, charge).number_format = ACC_FMT
+
+                # Charge (numeric), formatted as Accounting
+                if c_Charge:
+                    ws.cell(rr, c_Charge, charge)
+                    ws.cell(rr, c_Charge).number_format = ACC_FMT
+
+                # Total = Qty * Charge (numeric), formatted as Accounting
                 if c_Total:
                     try:
                         total_val = (qty or 0) * (float(charge) if charge not in [None, ""] else 0.0)
                     except Exception:
                         total_val = None
-                    ws.cell(rr, c_Total, total_val).number_format = ACC_FMT
+                    ws.cell(rr, c_Total, total_val)
+                    ws.cell(rr, c_Total).number_format = ACC_FMT
 
-            # Borders + body font
+            # Borders + body font (Segoe UI 10)
             last_row = start_row + max(n - 1, 0)
             table_cols = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
             if not table_cols:
-                table_cols = [hdr_col, hdr_col+1]
-            first_col, last_col = min(table_cols), max(table_cols)
+                table_cols = [hdr_col, hdr_col+1]  # minimal safety
+            last_col = max(table_cols)
+            first_col = min(table_cols)
+
+            # Header borders
             for c in range(first_col, last_col + 1):
-                ws.cell(hdr_row, c).border = border
+                cell = ws.cell(hdr_row, c)
+                cell.border = border
+
+            # Body borders + font
             for r in range(start_row, last_row + 1):
                 for c in range(first_col, last_col + 1):
                     cell = ws.cell(r, c)
                     cell.border = border
                     cell.font = font10
 
-            # ---------- Summary block (label-driven, anchored) ----------
+            # ---------- Summary block ----------
             total_col = c_Total if c_Total else c_Charge
             ACC = ACC_FMT
 
             tp_coord = disc_coord = tpp_coord = vat_coord = None
-            tpp_col_idx = None  # will anchor OPP to this same value column
 
             if total_col:
                 sum_rng = f"{get_column_letter(total_col)}{start_row}:{get_column_letter(total_col)}{last_row}"
 
                 # Total Package
-                r_tp, c_tp = _find_label_cell(ws, "Total Package")
+                r_tp, c_tp = _label_cell(ws, "Total Package")
                 if r_tp and c_tp:
-                    rv, cv = _value_cell_right_nearest(ws, r_tp, c_tp)
-                    _clear_then_set(ws, rv, cv, f"=SUM({sum_rng})", ACC)
-                    tp_coord = ws.cell(rv, cv).coordinate
+                    tp_cell = _value_cell_right(ws, r_tp, c_tp)
+                    tp_cell.value = f"=SUM({sum_rng})"
+                    tp_cell.number_format = ACC
+                    tp_coord = tp_cell.coordinate
 
-                # Discount
-                r_d, c_d = _find_label_cell(ws, "Discount")
+                # Discount (keep value if present, else set to 0)
+                r_d, c_d = _label_cell(ws, "Discount")
                 if r_d and c_d:
-                    rv, cv = _value_cell_right_nearest(ws, r_d, c_d)
-                    if ws.cell(rv, cv).value is None:
-                        _clear_then_set(ws, rv, cv, 0, ACC)
-                    else:
-                        ws.cell(rv, cv).number_format = ACC
-                    disc_coord = ws.cell(rv, cv).coordinate
+                    disc_cell = _value_cell_right(ws, r_d, c_d)
+                    if disc_cell.value is None:
+                        disc_cell.value = 0
+                    disc_cell.number_format = ACC
+                    disc_coord = disc_cell.coordinate
 
-                # Total Package Price = TP - Discount
-                r_tpp, c_tpp = _find_label_cell(ws, "Total Package Price")
+                # Total Package Price = Total Package - Discount
+                r_tpp, c_tpp = _label_cell(ws, "Total Package Price")
                 if r_tpp and c_tpp and tp_coord and disc_coord:
-                    rv, cv = _value_cell_right_nearest(ws, r_tpp, c_tpp)
-                    _clear_then_set(ws, rv, cv, f"={tp_coord}-{disc_coord}", ACC)
-                    tpp_coord = ws.cell(rv, cv).coordinate
-                    _, tpp_col_idx = coordinate_to_tuple(tpp_coord)  # <-- capture the value column (e.g., J)
+                    tpp_cell = _value_cell_right(ws, r_tpp, c_tpp)
+                    tpp_cell.value = f"={tp_coord}-{disc_coord}"
+                    tpp_cell.number_format = ACC
+                    tpp_coord = tpp_cell.coordinate
 
-                # VAT = TPP / 5
-                r_vat, c_vat = _find_label_cell(ws, "VAT")
+                # VAT = Total Package Price / 5
+                r_vat, c_vat = _label_cell(ws, "VAT")
                 if r_vat and c_vat and tpp_coord:
-                    rv, cv = _value_cell_right_nearest(ws, r_vat, c_vat)
-                    _clear_then_set(ws, rv, cv, f"={tpp_coord}/5", ACC)
-                    vat_coord = ws.cell(rv, cv).coordinate
+                    vat_cell = _value_cell_right(ws, r_vat, c_vat)
+                    vat_cell.value = f"={tpp_coord}/5"
+                    vat_cell.number_format = ACC
+                    vat_coord = vat_cell.coordinate
 
-                # Overall Package Price = TPP + VAT
-                r_opp, c_opp = _find_label_cell(ws, "Overall Package Price")
+                # ---- FORCE Overall Package Price = (TPP) + (VAT) ----
+                r_opp, c_opp = _label_cell(ws, "Overall Package Price")
                 if r_opp and c_opp and tpp_coord and vat_coord:
-                    # Force writing to the SAME value column as TPP (e.g., J), on the OPP row
-                    if tpp_col_idx is None:
-                        # fallback: nearest value cell to the right
-                        rv, cv = _value_cell_right_nearest(ws, r_opp, c_opp)
-                    else:
-                        rv, cv = r_opp, tpp_col_idx
-                    _clear_then_set(ws, rv, cv, f"={tpp_coord}+{vat_coord}", ACC)
+                    opp_cell = _value_cell_right(ws, r_opp, c_opp)
+                    opp_cell.value = None  # clear legacy like =J27+J29
+                    opp_cell.value = f"={tpp_coord}+{vat_coord}"
+                    opp_cell.number_format = ACC
 
-            # Save workbook into ZIP
+            # Save workbook into ZIP under templates/
             out_bytes = BytesIO()
             wb.save(out_bytes)
             out_bytes.seek(0)
@@ -421,6 +452,7 @@ if st.button("Submit"):
         st.error("Please upload both the Zoho Forms export and the MOF Cost Sheet.")
     else:
         with st.spinner("Processing..."):
+            # Read inputs
             try:
                 form_df = _read_any_table(form_file, preferred_sheet_name="Form")
             except Exception as e:
@@ -432,22 +464,27 @@ if st.button("Submit"):
                 st.exception(RuntimeError(f"Failed to read the MOF Cost Sheet: {e}"))
                 st.stop()
 
+            # Transform
             try:
                 cleaned = transform(form_df, costs_df)
             except Exception as e:
                 st.exception(e)
                 st.stop()
 
+            # Build results.zip with templates (if provided) + data/cleaned_output.xlsx
             zip_buf = BytesIO()
             with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                # Add cleaned_output.xlsx
                 cleaned_bytes = BytesIO()
                 cleaned.to_excel(cleaned_bytes, index=False)
                 zf.writestr("data/cleaned_output.xlsx", cleaned_bytes.getvalue())
 
+                # Optional: templates
                 if template_file is not None:
                     try:
                         template_bytes = template_file.read()
                         tpl_zip = _populate_template_bytes(template_bytes, cleaned, costs_df)
+                        # Copy files from tpl_zip into templates/ folder in our main ZIP
                         with zipfile.ZipFile(tpl_zip, 'r') as tplzf:
                             for info in tplzf.infolist():
                                 zf.writestr(info.filename, tplzf.read(info.filename))
@@ -455,6 +492,8 @@ if st.button("Submit"):
                         st.exception(RuntimeError(f"Template population failed: {e}"))
 
             zip_buf.seek(0)
+
+            # Summary & download
             st.success(f"Done. Cleaned {len(cleaned)} rows.")
             st.dataframe(cleaned.head(100), use_container_width=True)
             missing_costs = cleaned['Cost'].isna().sum()
@@ -469,4 +508,4 @@ if st.button("Submit"):
             )
 
 st.markdown("---")
-st.caption("OPP now writes to the **same value column as Total Package Price** on the OPP row, after clearing any legacy formula. Labels are matched forgivingly (case/colon/spacing).")
+st.caption("OPP is now explicitly set to (Total Package Price + VAT) in the first editable value cell to the right of its label, so it follows the table as rows are inserted.")
