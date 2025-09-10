@@ -49,15 +49,18 @@ def _is_event_label(x):
     s = str(x).strip()
     months3 = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec']
     if any(s.lower().startswith(m) for m in months3): return True
-    if s in ['Q1','Q2','Q3','Q4','Monthly','Quarterly']: return True
+    if s in ['Q1','Q2','Q3','Monthly','Quarterly']: return True
     if re.search(r'\d', s): return True
     return False
 
 def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert Zoho's wide export to normalized rows and join Cost (+ F2F/Online when present) from MOF sheet.
+    """
     if form_df.shape[0] < 2:
         return pd.DataFrame(columns=[
             'Random ID','Provider Name','Name','Phone','Email',
-            'Type','Event Date (if applicable)','Product','Cost'
+            'Type','Event Date (if applicable)','Product','Cost','F2F or Online?'
         ])
 
     subheaders = form_df.iloc[0]
@@ -108,27 +111,50 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
 
     out = pd.DataFrame.from_records(records)
 
+    # Attach ID columns
     for c in ID_COLS:
         out[c] = out['_ridx'].map(data_rows[c]) if c in data_rows.columns else None
 
     out = out[['Random ID','Provider Name','Name','Phone','Email',
                'Type','Event Date (if applicable)','Product']]
 
+    # ---- Join Cost (+ F2F/Online when present) ----
     def _norm(s): return None if pd.isna(s) else str(s).strip()
     if not set(['Type','Product','Cost']).issubset(costs_df.columns):
         raise ValueError("Cost sheet must contain columns: Type, Product, Cost")
+
     costs2 = costs_df.copy()
     costs2['Type_norm'] = costs2['Type'].apply(_norm)
     costs2['Product_norm'] = costs2['Product'].apply(_norm)
+
     out['Type_norm'] = out['Type'].apply(_norm)
     out['Product_norm'] = out['Product'].apply(_norm)
 
-    out = out.merge(
-        costs2[['Type_norm','Product_norm','Cost']],
-        on=['Type_norm','Product_norm'], how='left'
-    ).drop(columns=['Type_norm','Product_norm'])
+    # pick columns from cost sheet
+    bring_cols = ['Type_norm','Product_norm','Cost']
+    f2f_col_name = None
+    for cand in ['F2F or Online?', 'F2F or Online', 'F2F/Online']:
+        if cand in costs2.columns:
+            bring_cols.append(cand)
+            f2f_col_name = cand
+            break
 
-    out = out.sort_values(['Random ID','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
+    out = out.merge(costs2[bring_cols], on=['Type_norm','Product_norm'], how='left') \
+             .drop(columns=['Type_norm','Product_norm'])
+
+    # Arrange final columns
+    base_cols = ['Random ID','Provider Name','Name','Phone','Email',
+                 'Type','Event Date (if applicable)','Product','Cost']
+    if f2f_col_name:
+        out = out.rename(columns={f2f_col_name: 'F2F or Online?'})
+        base_cols.append('F2F or Online?')
+
+    out = out.reindex(columns=[c for c in base_cols if c in out.columns])
+
+    sort_cols = [c for c in ['Random ID','Type','Event Date (if applicable)','Product'] if c in out.columns]
+    if sort_cols:
+        out = out.sort_values(sort_cols).reset_index(drop=True)
+
     return out
 
 # ---------------------------
@@ -196,7 +222,7 @@ def _first_value_cell_right(ws, r, c, try_two=True):
 # ---------------------------
 
 def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame) -> BytesIO:
-    # Optional F2F mapping
+    # Optional F2F mapping (used to fill the table column in the template)
     f2f_map = {}
     if 'F2F or Online?' in costs_df.columns:
         def _n(s): return None if pd.isna(s) else str(s).strip()
@@ -281,89 +307,73 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             table_cols = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
             if not table_cols: table_cols = [hdr_col, hdr_col+1]
             first_col, last_col = min(table_cols), max(table_cols)
+            dotted = Side(style='dotted')
+            border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
             for c in range(first_col, last_col + 1):
-                ws.cell(hdr_row, c).border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
+                ws.cell(hdr_row, c).border = border
             for r in range(start_row, last_row + 1):
                 for c in range(first_col, last_col + 1):
                     cell = ws.cell(r, c)
-                    cell.border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
+                    cell.border = border
                     cell.font = font10
 
-            # ---------- Summary block (robust; label col auto-detected; OPP forced) ----------
+            # ---------- Summary block (column I scoped; values in column J) ----------
             ACC = ACC_FMT
             total_col = c_Total if c_Total else c_Charge
             if total_col:
                 sum_rng = f"{get_column_letter(total_col)}{start_row}:{get_column_letter(total_col)}{last_row}"
 
-                # Find the label column from "Total Package"
-                label_col = None
-                for c in range(1, ws.max_column + 1):
-                    for rr in range(last_row + 1, min(ws.max_row, last_row + 200) + 1):
-                        v = ws.cell(rr, c).value
-                        if v and _canon_label(v) == _canon_label("Total Package"):
-                            label_col = c
-                            break
-                    if label_col:
-                        break
-                if not label_col:
-                    label_col = 9  # fallback to I
-
-                value_col = label_col + 1
-
+                LABEL_COL = 9   # I
+                VALUE_COL = 10  # J
                 search_start = last_row + 1
-                search_end   = min(ws.max_row, last_row + 200)
+                search_end   = last_row + 200
 
                 # Total Package
-                r_tp, _ = _find_label_in_column(ws, "Total Package", label_col, search_start, search_end)
+                r_tp, c_tp = _find_label_in_column(ws, "Total Package", LABEL_COL, search_start, search_end)
                 tp_coord = None
                 if r_tp:
-                    tp_cell = _first_value_cell_right(ws, r_tp, label_col)
+                    tp_cell = _first_value_cell_right(ws, r_tp, c_tp)
                     tp_cell.value = f"=SUM({sum_rng})"
                     tp_cell.number_format = ACC
                     tp_coord = tp_cell.coordinate
 
                 # Discount
-                r_disc, _ = _find_label_in_column(ws, "Discount", label_col, search_start, search_end)
+                r_d, c_d = _find_label_in_column(ws, "Discount", LABEL_COL, search_start, search_end)
                 disc_coord = None
-                if r_disc:
-                    disc_cell = _first_value_cell_right(ws, r_disc, label_col)
+                if r_d:
+                    disc_cell = _first_value_cell_right(ws, r_d, c_d)
                     if disc_cell.value is None:
                         disc_cell.value = 0
                     disc_cell.number_format = ACC
                     disc_coord = disc_cell.coordinate
 
                 # Total Package Price = TP - Discount
-                r_tpp, _ = _find_label_in_column(ws, "Total Package Price", label_col, search_start, search_end)
+                r_tpp, c_tpp = _find_label_in_column(ws, "Total Package Price", LABEL_COL, search_start, search_end)
                 tpp_coord = None
                 if r_tpp and tp_coord and disc_coord:
-                    tpp_cell = _first_value_cell_right(ws, r_tpp, label_col)
+                    tpp_cell = _first_value_cell_right(ws, r_tpp, c_tpp)
                     tpp_cell.value = f"={tp_coord}-{disc_coord}"
                     tpp_cell.number_format = ACC
                     tpp_coord = tpp_cell.coordinate
 
                 # VAT = TPP / 5
-                r_vat, _ = _find_label_in_column(ws, "VAT", label_col, search_start, search_end)
+                r_vat, c_vat = _find_label_in_column(ws, "VAT", LABEL_COL, search_start, search_end)
                 vat_coord = None
                 if r_vat and tpp_coord:
-                    vat_cell = _first_value_cell_right(ws, r_vat, label_col)
+                    vat_cell = _first_value_cell_right(ws, r_vat, c_vat)
                     vat_cell.value = f"={tpp_coord}/5"
                     vat_cell.number_format = ACC
                     vat_coord = vat_cell.coordinate
 
-                # OPP row: try to locate by label; if not found, place 2 rows beneath VAT
-                r_opp, _ = _find_label_in_column(ws, "Overall Package Price", label_col, search_start, search_end)
-                if not r_opp and r_vat:
-                    r_opp = r_vat + 2  # sensible fallback that matches your layout
-
+                # Overall Package Price = TPP + VAT
+                r_opp, c_opp = _find_label_in_column(ws, "Overall Package Price", LABEL_COL, search_start, search_end)
                 if r_opp and tpp_coord and vat_coord:
-                    opp_cell = ws.cell(r_opp, value_col)
+                    opp_cell = ws.cell(r_opp, VALUE_COL)  # force J on that row
                     opp_cell.value = f"={tpp_coord}+{vat_coord}"
                     opp_cell.number_format = ACC
 
             # Save workbook into ZIP
-            out_bytes = BytesIO()
-            wb.save(out_bytes)
-            out_bytes.seek(0)
+            out_bytes = BytesIO(); wb.save(out_bytes); out_bytes.seek(0)
             safe_provider = re.sub(r'[^A-Za-z0-9 _.-]+', '_', provider_val or "Unknown_Provider")
             zf.writestr(f"templates/{safe_provider}.xlsx", out_bytes.getvalue())
 
@@ -380,7 +390,7 @@ st.title("Zoho Forms → Cleaned Output + Populated Templates")
 st.markdown("""
 Upload your files and click **Submit** to get a ZIP containing:
 - **templates/** → one populated workbook **per Provider Name**  
-- **data/cleaned_output.xlsx** → your single cleaned dataset
+- **data/cleaned_output.xlsx** → your single cleaned dataset (now includes **F2F or Online?**)
 """)
 
 c1, c2, c3 = st.columns(3)
@@ -444,4 +454,4 @@ if st.button("Submit"):
             )
 
 st.markdown("---")
-st.caption("OPP is now written in the detected summary column (label col) + 1, on the correct row, with a fallback below VAT.")
+st.caption("Clean data now includes 'F2F or Online?' (from MOF). Templates still populate table + summary with robust formulas.")
