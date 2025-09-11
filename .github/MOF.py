@@ -391,13 +391,12 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
 # ---------------------------
 # Streamlit App
 # ---------------------------
-st.set_page_config(page_title="Zoho Forms → Cleaned Output + Templates", layout="wide")
-st.title("Zoho Forms → Cleaned Output + Populated Templates")
+st.set_page_config(page_title="MOF Automation!")
 
 st.markdown("""
 Upload your files and click **Submit** to get a ZIP containing:
-- **templates/** → one populated workbook **per Provider Name**  
-- **data/cleaned_output.xlsx** → your single cleaned dataset (now includes **F2F or Online?** when present)
+- **MOF Templates** → one populated workbook **per Provider Name**  
+- **Cleaned Data** → your single cleaned dataset )
 """)
 
 c1, c2, c3 = st.columns(3)
