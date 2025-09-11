@@ -391,12 +391,12 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
 # ---------------------------
 # Streamlit App
 # ---------------------------
-st.set_page_config(page_title="MOF Automation!")
+st.set_page_config(page_title="MOF Automation")
 
 st.markdown("""
 Upload your files and click **Submit** to get a ZIP containing:
 - **MOF Templates** → one populated workbook **per Provider Name**  
-- **Cleaned Data** → your single cleaned dataset )
+- **Cleaned Data** → your single cleaned dataset 
 """)
 
 c1, c2, c3 = st.columns(3)
