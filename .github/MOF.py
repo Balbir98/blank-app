@@ -10,9 +10,9 @@ from openpyxl import load_workbook
 from openpyxl.styles import Border, Side, Font
 from openpyxl.utils import get_column_letter
 
-# ---------------------------
+# ===========================
 # Utilities: robust readers
-# ---------------------------
+# ===========================
 def _read_any_table(uploaded_file, preferred_sheet_name=None):
     name = uploaded_file.name.lower()
     ext = os.path.splitext(name)[1]
@@ -36,9 +36,9 @@ def _read_any_table(uploaded_file, preferred_sheet_name=None):
             uploaded_file.seek(0)
             return pd.read_csv(uploaded_file, engine="python", sep=None, encoding="latin-1")
 
-# ---------------------------
+# ===========================
 # Transformation Logic
-# ---------------------------
+# ===========================
 ID_COLS = ['Random ID', 'Provider Name', 'Name', 'Phone', 'Email']
 
 def _is_event_label(x):
@@ -149,13 +149,12 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
         base_cols.append('F2F or Online?')
 
     out = out.reindex(columns=[c for c in base_cols if c in out.columns])
-
     out = out.sort_values(['Random ID','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
     return out
 
-# ---------------------------
+# ===========================
 # Template helpers
-# ---------------------------
+# ===========================
 def _sanitize_name(name: str) -> str:
     if pd.isna(name): return ""
     s = str(name).replace(",", " ")
@@ -212,11 +211,11 @@ def _first_value_cell_right(ws, r, c, try_two=True):
         return ws.cell(r, cc)
     return ws.cell(r, c + 1)
 
-# ---------------------------
+# ===========================
 # Template population
-# ---------------------------
+# ===========================
 def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame) -> BytesIO:
-    # Optional F2F mapping
+    # Optional F2F mapping (used to fill the F2F column in the template table)
     f2f_map = {}
     if 'F2F or Online?' in costs_df.columns:
         def _n(s): return None if pd.isna(s) else str(s).strip()
@@ -307,7 +306,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 for c in range(first_col, last_col + 1):
                     cell = ws.cell(r, c)
                     cell.border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
-                    cell.font = font10
+                    cell.font = Font(name="Segoe UI", size=10)
 
             # ---------- Summary block (robust; label col auto-detected; OPP forced) ----------
             ACC = ACC_FMT
@@ -388,15 +387,31 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
     zip_buf.seek(0)
     return zip_buf
 
-# ---------------------------
+# ===========================
 # Streamlit App
-# ---------------------------
-st.set_page_config(page_title="MOF Automation")
+# ===========================
+st.set_page_config(page_title="MOF Automation", layout="wide")
+st.title("MOF Automation")
+
+# Button styles (red submit, green download)
+st.markdown("""
+<style>
+div.stButton > button:first-child {
+    background-color: #d90429 !important;
+    color: white !important;
+}
+div.stDownloadButton > button:first-child {
+    background-color: #2a9d8f !important;
+    color: white !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 st.markdown("""
 Upload your files and click **Submit** to get a ZIP containing:
-- **MOF Templates** → one populated workbook **per Provider Name**  
-- **Cleaned Data** → your single cleaned dataset 
+
+**MOF Templates** → one populated workbook per Provider Name  
+**Cleaned Data** → your single cleaned dataset
 """)
 
 c1, c2, c3 = st.columns(3)
@@ -428,18 +443,20 @@ if st.button("Submit"):
                 st.exception(e)
                 st.stop()
 
+            # Build results.zip with templates (if provided) + data/cleaned_output.xlsx
             zip_buf = BytesIO()
             with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-                # cleaned data
+                # Add cleaned_output.xlsx
                 cleaned_bytes = BytesIO()
                 cleaned.to_excel(cleaned_bytes, index=False)
                 zf.writestr("data/cleaned_output.xlsx", cleaned_bytes.getvalue())
 
-                # templates
+                # Optional: templates
                 if template_file is not None:
                     try:
                         template_bytes = template_file.read()
                         tpl_zip = _populate_template_bytes(template_bytes, cleaned, costs_df)
+                        # Copy files from tpl_zip into templates/ folder in our main ZIP
                         with zipfile.ZipFile(tpl_zip, 'r') as tplzf:
                             for info in tplzf.infolist():
                                 zf.writestr(info.filename, tplzf.read(info.filename))
@@ -448,17 +465,22 @@ if st.button("Submit"):
 
             zip_buf.seek(0)
             st.success(f"Done. Cleaned {len(cleaned)} rows.")
-            st.dataframe(cleaned.head(100), use_container_width=True)
+
+            # Missing costs warning (keep)
             missing_costs = cleaned['Cost'].isna().sum()
             if missing_costs > 0:
                 st.warning(f"{missing_costs} row(s) have no Cost match. Ensure (Type, Product) exist in the MOF Cost Sheet.")
+                with st.expander("Preview rows missing Cost"):
+                    st.dataframe(
+                        cleaned[cleaned['Cost'].isna()][
+                            ['Provider Name','Type','Event Date (if applicable)','Product']
+                        ].head(500)
+                    )
 
+            # Green "Download Now!" button
             st.download_button(
-                "Download results.zip",
+                "Download Now!",
                 data=zip_buf.getvalue(),
                 file_name="results.zip",
                 mime="application/zip"
             )
-
-st.markdown("---")
-st.caption("OPP still uses dynamic label detection and is set to TPP + VAT. Clean data now includes 'F2F or Online?' when available.")
