@@ -37,7 +37,34 @@ def _read_any_table(uploaded_file, preferred_sheet_name=None):
             return pd.read_csv(uploaded_file, engine="python", sep=None, encoding="latin-1")
 
 # ===========================
-# Wishlist Transformation Logic (existing)
+# Type -> Product overrides
+# ===========================
+TYPE_TO_PRODUCT = {
+    "Compliance Update Sponsorship": "Monthly Compliance Bulletin",
+    "Podcast": "Podcasts",
+    "Directly Authorised Club Site Takeover": "Directly Authorised Club Site Takeover",
+    "Full Takeover (DA Club and Adviser Site)": "Full Takeover (DA Club and Adviser Site)",
+    "Network Adviser Site Takeover": "Network Adviser Site Takeover",
+    "Promotional Emails": "Promotional Email",
+    "Social Media Post Share": "Social Media Post",
+    "Training Video": "Online training video (provider produces and edits)",
+    "Video adverts": "Video advert",
+}
+_TYPE_OVERRIDE_LC = {k.casefold().strip(): v for k, v in TYPE_TO_PRODUCT.items()}
+
+def _apply_type_overrides(df: pd.DataFrame) -> pd.DataFrame:
+    """Force Product based on Type using the override table (case-insensitive)."""
+    if 'Type' not in df.columns or 'Product' not in df.columns:
+        return df
+    def _override(row):
+        t = str(row.get('Type', '')).casefold().strip()
+        return _TYPE_OVERRIDE_LC.get(t, row.get('Product'))
+    df = df.copy()
+    df['Product'] = df.apply(_override, axis=1)
+    return df
+
+# ===========================
+# Wishlist Transformation Logic
 # ===========================
 ID_COLS = ['Random ID', 'Provider Name', 'Name', 'Phone', 'Email']
 
@@ -148,6 +175,9 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
         out = out.rename(columns={f2f_col_name: 'F2F or Online?'})
         base_cols.append('F2F or Online?')
 
+    # Apply Type→Product overrides
+    out = _apply_type_overrides(out)
+
     out = out.reindex(columns=[c for c in base_cols if c in out.columns])
     out = out.sort_values(['Random ID','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
     return out
@@ -183,7 +213,6 @@ def transform_confirmed(confirmed_df: pd.DataFrame) -> pd.DataFrame:
     c_f2f      = _pick(cols, "F2F or Online?", "F2F or Online", "F2F/Online")
     c_cost     = _pick(cols, "Product Cost", "Cost", "Charge")
 
-    required = [c_provider, c_contact, c_email, c_phone, c_type, c_product, c_cost]
     missing = [lab for lab, col in [
         ("Provider Name", c_provider),
         ("Contact Name for Content", c_contact),
@@ -209,10 +238,11 @@ def transform_confirmed(confirmed_df: pd.DataFrame) -> pd.DataFrame:
         'F2F or Online?': confirmed_df[c_f2f] if c_f2f else ""
     })
 
-    # Keep column exact name as used by template logic
-    out = out.rename(columns={'Event Date (if applicable)': 'Event Date (if applicable)'})
-    # Sort for consistency
-    out = out.sort_values(['Provider Name','Type','Event Date (if applicable)','Product'], na_position='last').reset_index(drop=True)
+    # Apply Type→Product overrides
+    out = _apply_type_overrides(out)
+
+    out = out.sort_values(['Provider Name','Type','Event Date (if applicable)','Product'],
+                          na_position='last').reset_index(drop=True)
     return out
 
 # ===========================
@@ -371,7 +401,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     cell.border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
                     cell.font = Font(name="Segoe UI", size=10)
 
-            # ---------- Summary block (robust; OPP = TPP + VAT) ----------
+            # ---------- Summary block (OPP = TPP + VAT) ----------
             ACC = ACC_FMT
             total_col = c_Total if c_Total else c_Charge
             if total_col:
@@ -522,7 +552,7 @@ if mode == "Wishlist":
 
                 zip_buf.seek(0)
                 st.success(f"Done. Cleaned {len(cleaned)} rows.")
-                # Missing costs warning (keep)
+                # Missing costs warning
                 missing_costs = cleaned['Cost'].isna().sum()
                 if missing_costs > 0:
                     st.warning(f"{missing_costs} row(s) have no Cost match. Ensure (Type, Product) exist in the MOF Cost Sheet.")
