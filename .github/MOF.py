@@ -37,7 +37,7 @@ def _read_any_table(uploaded_file, preferred_sheet_name=None):
             return pd.read_csv(uploaded_file, engine="python", sep=None, encoding="latin-1")
 
 # ===========================
-# Transformation Logic
+# Wishlist Transformation Logic (existing)
 # ===========================
 ID_COLS = ['Random ID', 'Provider Name', 'Name', 'Phone', 'Email']
 
@@ -51,7 +51,7 @@ def _is_event_label(x):
     if re.search(r'\d', s): return True
     return False
 
-def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
+def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     """
     Convert Zoho's wide export to normalized rows and join:
     - Cost (required) and
@@ -153,7 +153,70 @@ def transform(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 # ===========================
-# Template helpers
+# Confirmed Items Transform
+# ===========================
+def _pick(colnames, *candidates):
+    """Return the first matching column name (case-insensitive, trimmed)."""
+    lowmap = {str(c).strip().lower(): c for c in colnames}
+    for cand in candidates:
+        if cand is None: 
+            continue
+        key = str(cand).strip().lower()
+        if key in lowmap:
+            return lowmap[key]
+    return None
+
+def transform_confirmed(confirmed_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Map the confirmed-export into the same 'cleaned' shape expected by the template writer:
+      Provider Name, Name, Phone, Email, Type, Event Date (if applicable), Product, Cost, F2F or Online?
+    """
+    cols = list(confirmed_df.columns)
+
+    c_provider = _pick(cols, "Provider Name", "Provider")
+    c_contact  = _pick(cols, "Contact Name for Content", "Main Contact", "Contact Name")
+    c_email    = _pick(cols, "Contact Email", "Email")
+    c_phone    = _pick(cols, "Contact Phone Number", "Phone")
+    c_type     = _pick(cols, "Type Of Event", "Type of Event", "Type")
+    c_product  = _pick(cols, "Product Ordered", "Product")
+    c_month    = _pick(cols, "Event Date (If Applicable)", "Event Date (if applicable)", "Month")
+    c_f2f      = _pick(cols, "F2F or Online?", "F2F or Online", "F2F/Online")
+    c_cost     = _pick(cols, "Product Cost", "Cost", "Charge")
+
+    required = [c_provider, c_contact, c_email, c_phone, c_type, c_product, c_cost]
+    missing = [lab for lab, col in [
+        ("Provider Name", c_provider),
+        ("Contact Name for Content", c_contact),
+        ("Contact Email", c_email),
+        ("Contact Phone Number", c_phone),
+        ("Type Of Event", c_type),
+        ("Product Ordered", c_product),
+        ("Product Cost", c_cost)
+    ] if col is None]
+
+    if missing:
+        raise ValueError(f"Confirmed list is missing required columns: {', '.join(missing)}")
+
+    out = pd.DataFrame({
+        'Provider Name': confirmed_df[c_provider],
+        'Name': confirmed_df[c_contact].astype(str).str.replace(',', ' ', regex=False).str.replace(r'\s+', ' ', regex=True).str.strip(),
+        'Phone': confirmed_df[c_phone],
+        'Email': confirmed_df[c_email],
+        'Type': confirmed_df[c_type],
+        'Event Date (if applicable)': confirmed_df[c_month] if c_month else "",
+        'Product': confirmed_df[c_product],
+        'Cost': confirmed_df[c_cost],
+        'F2F or Online?': confirmed_df[c_f2f] if c_f2f else ""
+    })
+
+    # Keep column exact name as used by template logic
+    out = out.rename(columns={'Event Date (if applicable)': 'Event Date (if applicable)'})
+    # Sort for consistency
+    out = out.sort_values(['Provider Name','Type','Event Date (if applicable)','Product'], na_position='last').reset_index(drop=True)
+    return out
+
+# ===========================
+# Template helpers (shared)
 # ===========================
 def _sanitize_name(name: str) -> str:
     if pd.isna(name): return ""
@@ -191,7 +254,6 @@ def _canon_label(s: str) -> str:
     return re.sub(r'[^a-z0-9]+', '', str(s).lower())
 
 def _find_label_in_column(ws, label_text, col_idx, row_start, row_end):
-    """Search a bounded range in a specific label column (e.g. I)."""
     tgt = _canon_label(label_text)
     row_end = min(row_end, ws.max_row)
     for rr in range(row_start, row_end + 1):
@@ -203,7 +265,6 @@ def _find_label_in_column(ws, label_text, col_idx, row_start, row_end):
     return None, None
 
 def _first_value_cell_right(ws, r, c, try_two=True):
-    """Prefer the cell to the right (value col). If it's a literal '£', skip to next."""
     for cc in [c + 1, c + 2] if try_two else [c + 1]:
         v = ws.cell(r, cc).value
         if isinstance(v, str) and v.strip() == "£":
@@ -212,12 +273,12 @@ def _first_value_cell_right(ws, r, c, try_two=True):
     return ws.cell(r, c + 1)
 
 # ===========================
-# Template population
+# Template population (shared)
 # ===========================
-def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame) -> BytesIO:
-    # Optional F2F mapping (used to fill the F2F column in the template table)
+def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame | None) -> BytesIO:
+    # Optional F2F mapping from cost sheet (for Wishlist mode)
     f2f_map = {}
-    if 'F2F or Online?' in costs_df.columns:
+    if costs_df is not None and 'F2F or Online?' in costs_df.columns:
         def _n(s): return None if pd.isna(s) else str(s).strip()
         tmp = costs_df[['Product','F2F or Online?']].copy()
         tmp['Product_norm'] = tmp['Product'].apply(_n)
@@ -226,7 +287,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
     zip_buf = BytesIO()
     dotted = Side(style='dotted')
     border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
-    font10 = Font(name="Segoe UI", size=10)
     header_font = Font(name="Segoe UI", size=12, bold=True, color="FFFFFF")
     ACC_FMT = '_-£* #,##0.00_-;_-£* -#,##0.00_-;_-£* "-"??_-;_-@_-'
 
@@ -235,7 +295,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             wb = load_workbook(BytesIO(template_bytes))
             ws = wb.active
 
-            # Fixed fields
+            # Fixed fields (from cleaned df columns)
             provider_val = "" if pd.isna(provider) else str(provider)
             name_val = _sanitize_name(dfp['Name'].iloc[0] if 'Name' in dfp.columns and len(dfp) > 0 else "")
             phone_val = "" if 'Phone' not in dfp.columns else ("" if pd.isna(dfp['Phone'].iloc[0]) else str(dfp['Phone'].iloc[0]))
@@ -278,7 +338,9 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 qty   = 1
                 charge = r.get("Cost", None)
                 prod_key = None if pd.isna(prod) else str(prod).strip()
-                f2f_val = f2f_map.get(prod_key, "")
+                f2f_val = r.get("F2F or Online?", "")
+                if not f2f_val and prod_key in f2f_map:
+                    f2f_val = f2f_map.get(prod_key, "")
 
                 if c_Type:   ws.cell(rr, c_Type,   typ)
                 if c_Prod:   ws.cell(rr, c_Prod,   prod)
@@ -295,11 +357,12 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                         total_val = None
                     ws.cell(rr, c_Total, total_val).number_format = ACC_FMT
 
-            # Borders + body font
+            # Borders + font across full table width
             last_row = start_row + max(n - 1, 0)
             table_cols = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
             if not table_cols: table_cols = [hdr_col, hdr_col+1]
             first_col, last_col = min(table_cols), max(table_cols)
+            dotted = Side(style='dotted')
             for c in range(first_col, last_col + 1):
                 ws.cell(hdr_row, c).border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
             for r in range(start_row, last_row + 1):
@@ -308,13 +371,13 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     cell.border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
                     cell.font = Font(name="Segoe UI", size=10)
 
-            # ---------- Summary block (robust; label col auto-detected; OPP forced) ----------
+            # ---------- Summary block (robust; OPP = TPP + VAT) ----------
             ACC = ACC_FMT
             total_col = c_Total if c_Total else c_Charge
             if total_col:
                 sum_rng = f"{get_column_letter(total_col)}{start_row}:{get_column_letter(total_col)}{last_row}"
 
-                # Find the label column from "Total Package"
+                # Detect label column from "Total Package"
                 label_col = None
                 for c in range(1, ws.max_column + 1):
                     for rr in range(last_row + 1, min(ws.max_row, last_row + 200) + 1):
@@ -371,7 +434,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 # OPP row: try to locate by label; if not found, place 2 rows beneath VAT
                 r_opp, _ = _find_label_in_column(ws, "Overall Package Price", label_col, search_start, search_end)
                 if not r_opp and r_vat:
-                    r_opp = r_vat + 2  # sensible fallback that matches your layout
+                    r_opp = r_vat + 2
                 if r_opp and tpp_coord and vat_coord:
                     opp_cell = ws.cell(r_opp, value_col)
                     opp_cell.value = f"={tpp_coord}+{vat_coord}"
@@ -381,7 +444,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             out_bytes = BytesIO()
             wb.save(out_bytes)
             out_bytes.seek(0)
-            safe_provider = re.sub(r'[^A-Za-z0-9 _.-]+', '_', provider_val or "Unknown_Provider")
+            safe_provider = re.sub(r'[^A-Za-z0-9 _.-]+', '_', provider or "Unknown_Provider")
             zf.writestr(f"templates/{safe_provider}.xlsx", out_bytes.getvalue())
 
     zip_buf.seek(0)
@@ -411,76 +474,112 @@ st.markdown("""
 Upload your files and click **Submit** to get a ZIP containing:
 
 **MOF Templates** → one populated workbook per Provider Name  
-**Cleaned Data** → your single cleaned dataset
+**Cleaned Data** → your single cleaned dataset (Wishlist mode)
 """)
 
-c1, c2, c3 = st.columns(3)
-with c1:
-    form_file = st.file_uploader("Zoho Forms export (.csv/.xlsx/.xls)", type=["csv","xlsx","xls","txt"])
-with c2:
-    cost_file = st.file_uploader("MOF Cost Sheet (.csv/.xlsx/.xls)", type=["csv","xlsx","xls","txt"])
-with c3:
-    template_file = st.file_uploader("Template (Excel, optional)", type=["xlsx","xls"])
+mode = st.selectbox("Choose mode", ["Wishlist", "Confirmed Items"])
 
-if st.button("Submit"):
-    if not form_file or not cost_file:
-        st.error("Please upload both the Zoho Forms export and the MOF Cost Sheet.")
-    else:
-        with st.spinner("Processing..."):
-            try:
-                form_df = _read_any_table(form_file, preferred_sheet_name="Form")
-            except Exception as e:
-                st.exception(RuntimeError(f"Failed to read the Zoho Forms export: {e}"))
-                st.stop()
-            try:
-                costs_df = _read_any_table(cost_file)
-            except Exception as e:
-                st.exception(RuntimeError(f"Failed to read the MOF Cost Sheet: {e}"))
-                st.stop()
-            try:
-                cleaned = transform(form_df, costs_df)
-            except Exception as e:
-                st.exception(e)
-                st.stop()
+# ---------------- Wishlist UI ----------------
+if mode == "Wishlist":
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        form_file = st.file_uploader("Zoho Forms export (.csv/.xlsx/.xls)", type=["csv","xlsx","xls","txt"], key="form_wishlist")
+    with c2:
+        cost_file = st.file_uploader("MOF Cost Sheet (.csv/.xlsx/.xls)", type=["csv","xlsx","xls","txt"], key="cost_wishlist")
+    with c3:
+        template_file = st.file_uploader("Template (Excel)", type=["xlsx","xls"], key="tpl_wishlist")
 
-            # Build results.zip with templates (if provided) + data/cleaned_output.xlsx
-            zip_buf = BytesIO()
-            with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-                # Add cleaned_output.xlsx
-                cleaned_bytes = BytesIO()
-                cleaned.to_excel(cleaned_bytes, index=False)
-                zf.writestr("data/cleaned_output.xlsx", cleaned_bytes.getvalue())
+    if st.button("Submit", key="submit_wishlist"):
+        if not form_file or not cost_file or not template_file:
+            st.error("Please upload the Zoho Forms export, MOF Cost Sheet, and Template.")
+        else:
+            with st.spinner("Processing wishlist..."):
+                try:
+                    form_df = _read_any_table(form_file, preferred_sheet_name="Form")
+                    costs_df = _read_any_table(cost_file)
+                    cleaned = transform_wishlist(form_df, costs_df)
+                except Exception as e:
+                    st.exception(e)
+                    st.stop()
 
-                # Optional: templates
-                if template_file is not None:
+                # Build results.zip with templates + cleaned data
+                zip_buf = BytesIO()
+                with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    # cleaned_output.xlsx
+                    cleaned_bytes = BytesIO()
+                    cleaned.to_excel(cleaned_bytes, index=False)
+                    zf.writestr("data/cleaned_output.xlsx", cleaned_bytes.getvalue())
+
+                    # templates/*
                     try:
                         template_bytes = template_file.read()
                         tpl_zip = _populate_template_bytes(template_bytes, cleaned, costs_df)
-                        # Copy files from tpl_zip into templates/ folder in our main ZIP
                         with zipfile.ZipFile(tpl_zip, 'r') as tplzf:
                             for info in tplzf.infolist():
                                 zf.writestr(info.filename, tplzf.read(info.filename))
                     except Exception as e:
                         st.exception(RuntimeError(f"Template population failed: {e}"))
 
-            zip_buf.seek(0)
-            st.success(f"Done. Cleaned {len(cleaned)} rows.")
+                zip_buf.seek(0)
+                st.success(f"Done. Cleaned {len(cleaned)} rows.")
+                # Missing costs warning (keep)
+                missing_costs = cleaned['Cost'].isna().sum()
+                if missing_costs > 0:
+                    st.warning(f"{missing_costs} row(s) have no Cost match. Ensure (Type, Product) exist in the MOF Cost Sheet.")
+                    with st.expander("Preview rows missing Cost"):
+                        st.dataframe(
+                            cleaned[cleaned['Cost'].isna()][
+                                ['Provider Name','Type','Event Date (if applicable)','Product']
+                            ].head(500)
+                        )
 
-            # Missing costs warning (keep)
-            missing_costs = cleaned['Cost'].isna().sum()
-            if missing_costs > 0:
-                st.warning(f"{missing_costs} row(s) have no Cost match. Ensure (Type, Product) exist in the MOF Cost Sheet.")
-                with st.expander("Preview rows missing Cost"):
-                    st.dataframe(
-                        cleaned[cleaned['Cost'].isna()][
-                            ['Provider Name','Type','Event Date (if applicable)','Product']
-                        ].head(500)
-                    )
+                st.download_button(
+                    "Download Now!",
+                    data=zip_buf.getvalue(),
+                    file_name="results.zip",
+                    mime="application/zip",
+                    key="dl_wishlist"
+                )
 
-            # Green "Download Now!" button
-            st.download_button(
-                "Download Now!",
-                data=zip_buf.getvalue(),
-                file_name="results.zip",
-                mime="application/zip"
-            )
+# ---------------- Confirmed Items UI ----------------
+else:
+    c1, c2 = st.columns(2)
+    with c1:
+        confirmed_file = st.file_uploader("Confirmed Items export (.csv/.xlsx/.xls)", type=["csv","xlsx","xls","txt"], key="confirmed_list")
+    with c2:
+        template_file_c = st.file_uploader("Template (Excel)", type=["xlsx","xls"], key="tpl_confirmed")
+
+    if st.button("Submit", key="submit_confirmed"):
+        if not confirmed_file or not template_file_c:
+            st.error("Please upload the Confirmed Items export and the Template.")
+        else:
+            with st.spinner("Processing confirmed items..."):
+                try:
+                    confirmed_df = _read_any_table(confirmed_file)
+                    cleaned_confirmed = transform_confirmed(confirmed_df)
+                except Exception as e:
+                    st.exception(e)
+                    st.stop()
+
+                # Build results.zip with templates only
+                zip_buf = BytesIO()
+                with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    try:
+                        template_bytes = template_file_c.read()
+                        tpl_zip = _populate_template_bytes(template_bytes, cleaned_confirmed, costs_df=None)
+                        with zipfile.ZipFile(tpl_zip, 'r') as tplzf:
+                            for info in tplzf.infolist():
+                                zf.writestr(info.filename, tplzf.read(info.filename))
+                    except Exception as e:
+                        st.exception(RuntimeError(f"Template population failed: {e}"))
+
+                zip_buf.seek(0)
+                st.success(f"Done. Generated {cleaned_confirmed['Provider Name'].nunique()} provider template(s).")
+
+                st.download_button(
+                    "Download Now!",
+                    data=zip_buf.getvalue(),
+                    file_name="confirmed_results.zip",
+                    mime="application/zip",
+                    key="dl_confirmed"
+                )
