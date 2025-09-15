@@ -49,6 +49,8 @@ TYPE_TO_PRODUCT = {
     "Social Media Post Share": "Social Media Post",
     "Training Video": "Online training video (provider produces and edits)",
     "Video adverts": "Video advert",
+    # NEW:
+    "Product Focus Emails": "Product Focus emails",
 }
 _TYPE_OVERRIDE_LC = {k.casefold().strip(): v for k, v in TYPE_TO_PRODUCT.items()}
 
@@ -83,6 +85,8 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     Convert Zoho's wide export to normalized rows and join:
     - Cost (required) and
     - F2F or Online? (optional, if present in MOF sheet)
+    Adds a fallback: if strict (Type, Product) join fails, fill by Product-only
+    when that product has a single unique price in the MOF sheet.
     """
     if form_df.shape[0] < 2:
         return pd.DataFrame(columns=[
@@ -145,10 +149,13 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     out = out[['Random ID','Provider Name','Name','Phone','Email',
                'Type','Event Date (if applicable)','Product']]
 
-    # ---- Join Cost (+ F2F/Online when present) ----
+    # ---- Join Cost (+ F2F/Online when present) with fallback ----
     def _norm(s): return None if pd.isna(s) else str(s).strip()
     if not set(['Type','Product','Cost']).issubset(costs_df.columns):
         raise ValueError("Cost sheet must contain columns: Type, Product, Cost")
+
+    # Apply Type→Product overrides BEFORE joining to keep everything aligned with MOF
+    out = _apply_type_overrides(out)
 
     costs2 = costs_df.copy()
     costs2['Type_norm'] = costs2['Type'].apply(_norm)
@@ -165,18 +172,37 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
             f2f_col_name = cand
             break
 
-    out = out.merge(costs2[bring_cols], on=['Type_norm','Product_norm'], how='left') \
-             .drop(columns=['Type_norm','Product_norm'])
+    # 1) Strict (Type, Product)
+    out = out.merge(costs2[bring_cols], on=['Type_norm','Product_norm'], how='left')
 
-    # Arrange final columns: F2F right after Cost (if present)
+    # 2) Fallback by Product-only when unique price across MOF
+    prod_groups = costs2.groupby('Product_norm', dropna=False)
+    unique_prod_mask = (prod_groups['Cost'].nunique() == 1)
+    unique_products = unique_prod_mask[unique_prod_mask].index
+    prod_only = costs2[costs2['Product_norm'].isin(unique_products)].copy()
+
+    prod_only_keep = ['Product_norm','Cost']
+    if f2f_col_name:
+        prod_only_keep.append(f2f_col_name)
+    prod_only = prod_only[prod_only_keep].drop_duplicates(subset=['Product_norm'])
+
+    need = out['Cost'].isna()
+    if need.any():
+        fill_df = out.loc[need, ['Product_norm']].merge(
+            prod_only, on='Product_norm', how='left'
+        )
+        out.loc[need, 'Cost'] = fill_df['Cost'].values
+        if f2f_col_name and f2f_col_name in fill_df.columns:
+            need_f2f = need & out.get(f2f_col_name, pd.Series([None]*len(out))).isna()
+            out.loc[need_f2f, f2f_col_name] = fill_df[f2f_col_name].values
+
+    # Clean temp cols & finalize columns
+    out = out.drop(columns=['Type_norm','Product_norm'])
     base_cols = ['Random ID','Provider Name','Name','Phone','Email',
                  'Type','Event Date (if applicable)','Product','Cost']
     if f2f_col_name:
         out = out.rename(columns={f2f_col_name: 'F2F or Online?'})
         base_cols.append('F2F or Online?')
-
-    # Apply Type→Product overrides
-    out = _apply_type_overrides(out)
 
     out = out.reindex(columns=[c for c in base_cols if c in out.columns])
     out = out.sort_values(['Random ID','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
@@ -189,7 +215,7 @@ def _pick(colnames, *candidates):
     """Return the first matching column name (case-insensitive, trimmed)."""
     lowmap = {str(c).strip().lower(): c for c in colnames}
     for cand in candidates:
-        if cand is None: 
+        if cand is None:
             continue
         key = str(cand).strip().lower()
         if key in lowmap:
@@ -238,7 +264,7 @@ def transform_confirmed(confirmed_df: pd.DataFrame) -> pd.DataFrame:
         'F2F or Online?': confirmed_df[c_f2f] if c_f2f else ""
     })
 
-    # Apply Type→Product overrides
+    # Apply Type→Product overrides (includes Product Focus Emails → Product Focus emails)
     out = _apply_type_overrides(out)
 
     out = out.sort_values(['Provider Name','Type','Event Date (if applicable)','Product'],
@@ -316,7 +342,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
 
     zip_buf = BytesIO()
     dotted = Side(style='dotted')
-    border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
     header_font = Font(name="Segoe UI", size=12, bold=True, color="FFFFFF")
     ACC_FMT = '_-£* #,##0.00_-;_-£* -#,##0.00_-;_-£* "-"??_-;_-@_-'
 
@@ -392,7 +417,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             table_cols = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
             if not table_cols: table_cols = [hdr_col, hdr_col+1]
             first_col, last_col = min(table_cols), max(table_cols)
-            dotted = Side(style='dotted')
             for c in range(first_col, last_col + 1):
                 ws.cell(hdr_row, c).border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
             for r in range(start_row, last_row + 1):
