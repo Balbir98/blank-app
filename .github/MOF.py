@@ -50,8 +50,7 @@ TYPE_TO_PRODUCT = {
     "Training Video": "Online training video (provider produces and edits)",
     "Video adverts": "Video advert",
     "Product Focus emails": "Product Focus emails",
-
-    # Explicit 1:1 mappings requested
+    # Explicit
     "Compliance Webinar Sponsorship": "Compliance Webinar Sponsorship",
     "Full Adviser Site Takeover (Network and DA Club)": "Full Adviser Site Takeover (Network and DA Club)",
 }
@@ -100,7 +99,7 @@ REPEATED_FIRST = [
     'Invoice Name','Invoice Email',
 ]
 
-# Include your long Zoho label here
+# Recognised Zoho notes labels (we'll read them but never export them)
 NOTES_SOURCE_HEADERS = [
     "Please provide any feedback on our Marketing & Opportunities 2026 Pack and webinar:",
     "Please provide any further notes you may have or want to have considered with this form:",
@@ -108,6 +107,7 @@ NOTES_SOURCE_HEADERS = [
     "Any further notes",
 ]
 
+# Only standard ID/admin fields here (NOT notes)
 ID_COLS_WISHLIST = [
     'Random ID','Provider Name','Name','Phone','Email',
     'Events Name','Events Email',
@@ -115,7 +115,7 @@ ID_COLS_WISHLIST = [
     'Copy Name','Copy Email',
     'When To Invoice',
     'Invoice Name','Invoice Email',
-]  # <-- do NOT add notes headers here any more (keeps them out of the cleaned export)
+]
 
 def _is_event_label(x):
     if pd.isna(x):
@@ -150,16 +150,10 @@ def _is_unchecked(v) -> bool:
 def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     """
     Parse Zoho's wide export (row 0 = subheaders) → long rows,
-    then join Cost (+F2F) and include the new repeated fields.
-
-    Changes:
-      * Product lookups to MOF Cost are by Product only (not Type+Product).
-      * Regional Roadshow Event handling:
-           - sub-header (region) → Event Date
-           - cell value (option picked) → Product
-           - skip blanks/unchecked
-      * Type→Product overrides applied BEFORE cost merge.
-      * Notes kept only for template population (not in cleaned export).
+    then join Cost (+F2F).
+    - Product lookups to MOF Cost are by Product only.
+    - Regional Roadshow: sub-header(region)→Event Date; cell(ticked option)→Product.
+    - Notes captured privately (_notes_long_), not exported.
     """
     if form_df.shape[0] < 2:
         return pd.DataFrame(columns=REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?'])
@@ -170,7 +164,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     col_lc_map = {str(c).strip().lower(): c for c in form_df.columns}
     wanted_cols = [col_lc_map.get(c.lower()) for c in ID_COLS_WISHLIST if col_lc_map.get(c.lower())]
 
-    # find the notes column in the raw form (optional)
+    # locate notes column in raw form (optional)
     notes_col = None
     for cand in NOTES_SOURCE_HEADERS:
         c = col_lc_map.get(cand.strip().lower())
@@ -183,7 +177,6 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
         current_type = None
         for j, col in enumerate(form_df.columns):
             val = row[col]
-            # establish/track the "Type" based on the main titled column
             if not str(col).startswith('Unnamed'):
                 if col not in wanted_cols and col not in ['Added Time','Referrer Name','Task Owner']:
                     current_type = col
@@ -193,11 +186,10 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
             sub = subheaders.iloc[j] if j < len(subheaders) else None
             text_val = str(val).strip()
 
-            # ===== Special case: Regional Roadshow Event matrix =====
-            # Region lives in the sub-header; cell contains chosen option label
+            # Regional matrix
             if current_type and _is_rre_type(current_type) and sub is not None and _looks_like_location(str(sub)):
                 if _is_unchecked(text_val):
-                    continue  # nothing selected for this region
+                    continue
                 records.append({
                     '_ridx': ridx,
                     'Type': current_type,
@@ -206,7 +198,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
                 })
                 continue
 
-            # ===== Default behaviour for non-RRE cells =====
+            # Default behaviour
             if not str(col).startswith('Unnamed'):
                 if col in wanted_cols or col in ['Added Time','Referrer Name','Task Owner']:
                     continue
@@ -238,41 +230,38 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
 
     out = pd.DataFrame.from_records(records)
 
-    # Attach repeated fields from data_rows
+    # Attach repeated fields
     for c in REPEATED_FIRST:
         if c in data_rows.columns:
             out[c] = out['_ridx'].map(data_rows[c])
         else:
             out[c] = None
 
-    # Capture notes into a private column for template use only (not exported)
+    # Private notes column (not exported)
     if notes_col and notes_col in data_rows.columns:
         out['_notes_long_'] = out['_ridx'].map(data_rows[notes_col])
     else:
         out['_notes_long_'] = ""
 
-    # Nothing parsed
     if out.empty:
         return pd.DataFrame(columns=REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?'])
 
-    # Keep only the key outputs before cost join (plus the private notes col)
     out = out[['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','_notes_long_']].copy()
 
-    # --- Clean up any accidental "location as product" on RRE rows ---
+    # Clean: prevent location as product for RRE rows
     mask_rre = out['Type'].apply(_is_rre_type).fillna(False)
     out.loc[mask_rre & out['Product'].apply(_looks_like_location), 'Product'] = None
 
-    # Apply Type→Product overrides BEFORE cost merge
+    # Apply overrides before costs
     out = _apply_type_overrides(out)
 
-    # ---- Join Cost (+ F2F) by PRODUCT ONLY ----
+    # Costs join by Product only
     def _norm(s): return None if pd.isna(s) else str(s).strip()
     if 'Product' not in costs_df.columns or 'Cost' not in costs_df.columns:
-        raise ValueError("Cost sheet must contain columns: Product, Cost (Type optional but ignored for lookup)")
+        raise ValueError("Cost sheet must contain columns: Product, Cost")
 
     costs2 = costs_df.copy()
     costs2['Product_norm'] = costs2['Product'].apply(_norm)
-
     bring_cols = ['Product_norm','Cost']
     f2f_col_name = None
     for cand in ['F2F or Online?', 'F2F or Online', 'F2F/Online']:
@@ -285,7 +274,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     out['Product_norm'] = out['Product'].apply(_norm)
     out = out.merge(costs2, on=['Product_norm'], how='left').drop(columns=['Product_norm'])
 
-    # Final column order for internal processing (private notes retained for template)
+    # Final internal columns (includes private notes)
     final_cols_internal = REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost']
     if f2f_col_name:
         out = out.rename(columns={f2f_col_name: 'F2F or Online?'})
@@ -359,13 +348,11 @@ def transform_confirmed(confirmed_df: pd.DataFrame) -> pd.DataFrame:
         'Cost': confirmed_df[c_cost],
         'F2F or Online?': confirmed_df[c_f2f] if c_f2f else "",
     })
-    # Apply overrides as a safety net
     out = _apply_type_overrides(out)
-    # Keep order
     final_cols = REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?']
     out = out[final_cols].sort_values(['Provider Name','Type','Event Date (if applicable)','Product'],
                                       na_position='last').reset_index(drop=True)
-    # Keep notes for template stage (store in private column)
+    # Private notes (only used for template)
     if notes_col:
         out['_notes_long_'] = confirmed_df[notes_col]
     else:
@@ -430,7 +417,7 @@ def _first_value_cell_right(ws, r, c, try_two=True):
     return ws.cell(r, c + 1)
 
 # ===========================
-# Template population (shared) — NEW template layout
+# Template population (shared)
 # ===========================
 def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame | None) -> BytesIO:
     # Build a product->F2F map if we have a cost sheet (Wishlist mode)
@@ -443,11 +430,11 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
 
     zip_buf = BytesIO()
     dotted = Side(style='dotted')
-    header_font = Font(name="Segoe UI", size=12, bold=True, color="000000")  # headers styling minimal
+    # WHITE header text (on orange background)
+    header_font = Font(name="Segoe UI", size=12, bold=True, color="FFFFFF")
     ACC_FMT = '_-£* #,##0.00_-;_-£* -#,##0.00_-;_-£* "-"??_-;_-@_-'
 
     with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        # IMPORTANT: we'll export a version of "cleaned" WITHOUT the private notes column later.
         for provider, dfp in cleaned.groupby('Provider Name', dropna=False):
             wb = load_workbook(BytesIO(template_bytes))
             ws = wb.active
@@ -463,7 +450,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             ws['B6'] = nm
             ws['D4'] = wti
             ws['D6'] = ph
-            ws['E6'] = em
+            ws['F6'] = em   # << moved Email here (from E6)
 
             # Secondary contacts
             def _first(dfcol): 
@@ -488,7 +475,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             c_Total  = _get_col(hmap, "Total")
             c_Notes  = _get_col(hmap, "Notes")
 
-            # Make header font bold (optional)
+            # Header font = white
             for c in [c_Type,c_Prod,c_Det,c_Date,c_Charge,c_Qty,c_Total,c_Notes]:
                 if c: ws.cell(hdr_row, c).font = header_font
 
@@ -506,7 +493,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 datev = r.get("Event Date (if applicable)", "")
                 charge = r.get("Cost", None)
                 qty = 1
-                # Details column: F2F/Online (from cleaned or fallback from cost map)
                 details = r.get("F2F or Online?", "")
                 if not details:
                     pk = None if pd.isna(prod) else str(prod).strip()
@@ -555,13 +541,12 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     if label_col:
                         break
                 if not label_col:
-                    label_col = 8  # fallback H if needed
+                    label_col = 8
 
                 value_col = label_col + 1
                 search_start = last_row + 1
                 search_end   = min(ws.max_row, last_row + 200)
 
-                # Total Package
                 r_tp, _ = _find_label_in_column(ws, "Total Package", label_col, search_start, search_end)
                 tp_coord = None
                 if r_tp:
@@ -570,7 +555,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     tp_cell.number_format = ACC
                     tp_coord = tp_cell.coordinate
 
-                # Discount
                 r_disc, _ = _find_label_in_column(ws, "Discount", label_col, search_start, search_end)
                 disc_coord = None
                 if r_disc:
@@ -580,7 +564,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     disc_cell.number_format = ACC
                     disc_coord = disc_cell.coordinate
 
-                # Total Package Price = TP - Discount
                 r_tpp, _ = _find_label_in_column(ws, "Total Package Price", label_col, search_start, search_end)
                 tpp_coord = None
                 if r_tpp and tp_coord and disc_coord:
@@ -589,7 +572,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     tpp_cell.number_format = ACC
                     tpp_coord = tpp_cell.coordinate
 
-                # VAT = TPP / 5
                 r_vat, _ = _find_label_in_column(ws, "VAT", label_col, search_start, search_end)
                 vat_coord = None
                 if r_vat and tpp_coord:
@@ -598,7 +580,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     vat_cell.number_format = ACC
                     vat_coord = vat_cell.coordinate
 
-                # OPP = TPP + VAT
                 r_opp, _ = _find_label_in_column(ws, "Overall Package Price", label_col, search_start, search_end)
                 if not r_opp and r_vat:
                     r_opp = r_vat + 2
@@ -610,7 +591,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             # ---------- Notes into B27 (wrapped) ----------
             note_text = ""
             if '_notes_long_' in dfp.columns:
-                # aggregate unique non-empty
                 note_text = "\n\n".join([str(x).strip() for x in dfp['_notes_long_'].fillna("").unique() if str(x).strip()])
             if note_text:
                 cell = ws['B27']
@@ -673,16 +653,17 @@ if mode == "Wishlist":
                     st.exception(e)
                     st.stop()
 
-                # Build results.zip with templates + cleaned data (without notes)
+                # Build results.zip with templates + cleaned data (without notes and without stray Zoho-note columns)
                 zip_buf = BytesIO()
                 with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-                    # cleaned_output.xlsx (drop the private notes column)
                     cleaned_to_export = cleaned_internal.drop(columns=['_notes_long_'], errors='ignore')
+                    # hard-drop the Zoho notes headers if they somehow slipped through
+                    cleaned_to_export = cleaned_to_export.drop(columns=[h for h in NOTES_SOURCE_HEADERS if h in cleaned_to_export.columns], errors='ignore')
+
                     cleaned_bytes = BytesIO()
                     cleaned_to_export.to_excel(cleaned_bytes, index=False)
                     zf.writestr("data/cleaned_output.xlsx", cleaned_bytes.getvalue())
 
-                    # templates/*
                     try:
                         template_bytes = template_file.read()
                         tpl_zip = _populate_template_bytes(template_bytes, cleaned_internal, costs_df)
@@ -695,7 +676,6 @@ if mode == "Wishlist":
                 zip_buf.seek(0)
                 st.success(f"Done. Cleaned {len(cleaned_to_export)} rows.")
 
-                # Missing costs warning
                 missing_costs = cleaned_to_export['Cost'].isna().sum()
                 if missing_costs > 0:
                     st.warning(f"{missing_costs} row(s) have no Cost match by Product. Ensure Product exists in the MOF Cost Sheet.")
@@ -734,7 +714,6 @@ else:
                     st.exception(e)
                     st.stop()
 
-                # Build results.zip with templates only
                 zip_buf = BytesIO()
                 with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
                     try:
