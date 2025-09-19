@@ -147,7 +147,7 @@ def _is_rre_type(t: str) -> bool:
 def _is_unchecked(v) -> bool:
     if pd.isna(v): return True
     s = str(v).strip().casefold()
-    return s in {"", "no", "false", "0", "none", "n/a", "na"}
+    return s in {"", "no", "false", "0", "none", "n/a", "na", "not selected", "unchecked"}
 
 def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -194,14 +194,16 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
             text_val = str(val).strip()
 
             # ===== Special case: Regional Roadshow Event matrix =====
+            # Region lives in the sub-header; cell contains chosen option label
             if current_type and _is_rre_type(current_type) and sub is not None and _looks_like_location(str(sub)):
                 if _is_unchecked(text_val):
                     continue  # nothing selected for this region
-                # If the cell contains the option text, use it as Product
-                prod = text_val
-                evt = str(sub).strip()  # region into Event Date
-                records.append({'_ridx': ridx, 'Type': current_type,
-                                'Event Date (if applicable)': evt, 'Product': prod})
+                records.append({
+                    '_ridx': ridx,
+                    'Type': current_type,
+                    'Event Date (if applicable)': str(sub).strip(),
+                    'Product': text_val
+                })
                 continue
 
             # ===== Default behaviour for non-RRE cells =====
@@ -244,10 +246,14 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
             if c in REPEATED_FIRST:
                 out[c] = None
 
+    # Nothing parsed
+    if out.empty:
+        return pd.DataFrame(columns=REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?'])
+
+    # Keep only the key outputs before cost join
     out = out[['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product']].copy()
 
-    # Remove rows created by RRE parsing where Product accidentally equals the location
-    out.loc[_is_rre_type(out['Type']) if isinstance(out['Type'], pd.Series) else False, :]  # no-op guard
+    # --- Clean up any accidental "location as product" on RRE rows ---
     mask_rre = out['Type'].apply(_is_rre_type).fillna(False)
     out.loc[mask_rre & out['Product'].apply(_looks_like_location), 'Product'] = None
 
@@ -347,10 +353,13 @@ def transform_confirmed(confirmed_df: pd.DataFrame) -> pd.DataFrame:
         'Cost': confirmed_df[c_cost],
         'F2F or Online?': confirmed_df[c_f2f] if c_f2f else "",
     })
+    # Apply overrides as a safety net
     out = _apply_type_overrides(out)
+    # Keep order
     final_cols = REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?']
     out = out[final_cols].sort_values(['Provider Name','Type','Event Date (if applicable)','Product'],
                                       na_position='last').reset_index(drop=True)
+    # Keep notes for template stage
     if notes_col:
         out['_notes_long_'] = confirmed_df[notes_col]
     else:
@@ -415,9 +424,10 @@ def _first_value_cell_right(ws, r, c, try_two=True):
     return ws.cell(r, c + 1)
 
 # ===========================
-# Template population (shared)
+# Template population (shared) — NEW template layout
 # ===========================
 def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame | None) -> BytesIO:
+    # Build a product->F2F map if we have a cost sheet (Wishlist mode)
     f2f_map = {}
     if costs_df is not None and 'F2F or Online?' in costs_df.columns:
         def _n(s): return None if pd.isna(s) else str(s).strip()
@@ -427,7 +437,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
 
     zip_buf = BytesIO()
     dotted = Side(style='dotted')
-    header_font = Font(name="Segoe UI", size=12, bold=True, color="000000")
+    header_font = Font(name="Segoe UI", size=12, bold=True, color="000000")  # headers styling minimal
     ACC_FMT = '_-£* #,##0.00_-;_-£* -#,##0.00_-;_-£* "-"??_-;_-@_-'
 
     with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -435,6 +445,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             wb = load_workbook(BytesIO(template_bytes))
             ws = wb.active
 
+            # Fixed cells
             prov = "" if pd.isna(provider) else str(provider)
             nm   = _sanitize_name(dfp['Name'].iloc[0] if 'Name' in dfp.columns and len(dfp) else "")
             ph   = "" if 'Phone' not in dfp.columns else ("" if pd.isna(dfp['Phone'].iloc[0]) else str(dfp['Phone'].iloc[0]))
@@ -447,7 +458,8 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             ws['D6'] = ph
             ws['E6'] = em
 
-            def _first(dfcol):
+            # Secondary contacts
+            def _first(dfcol): 
                 return (dfcol.iloc[0] if dfcol is not None and len(dfp) else "")
             if 'Events Name' in dfp.columns: ws['B10'] = _first(dfp['Events Name'])
             if 'Events Email' in dfp.columns: ws['B12'] = _first(dfp['Events Email'])
@@ -458,6 +470,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             if 'Copy Name' in dfp.columns: ws['H10'] = _first(dfp['Copy Name'])
             if 'Copy Email' in dfp.columns: ws['H12'] = _first(dfp['Copy Email'])
 
+            # Find table header
             hdr_row, hdr_col, hmap = _find_table_header_row(ws)
             c_Type   = _get_col(hmap, "Type")
             c_Prod   = _get_col(hmap, "Product")
@@ -468,14 +481,17 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             c_Total  = _get_col(hmap, "Total")
             c_Notes  = _get_col(hmap, "Notes")
 
+            # Make header font bold (optional)
             for c in [c_Type,c_Prod,c_Det,c_Date,c_Charge,c_Qty,c_Total,c_Notes]:
                 if c: ws.cell(hdr_row, c).font = header_font
 
+            # Insert rows for n items
             start_row = hdr_row + 1
             n = len(dfp)
             if n > 1:
                 ws.insert_rows(start_row + 1, amount=n - 1)
 
+            # Fill rows
             for i, (_, r) in enumerate(dfp.iterrows()):
                 rr = start_row + i
                 typ   = r.get("Type", "")
@@ -483,6 +499,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 datev = r.get("Event Date (if applicable)", "")
                 charge = r.get("Cost", None)
                 qty = 1
+                # Details column: F2F/Online (from cleaned or fallback from cost map)
                 details = r.get("F2F or Online?", "")
                 if not details:
                     pk = None if pd.isna(prod) else str(prod).strip()
@@ -505,6 +522,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 if c_Notes:
                     ws.cell(rr, c_Notes, None)
 
+            # Borders across table (dotted)
             last_row = start_row + max(n - 1, 0)
             table_cols = [c for c in [c_Type,c_Prod,c_Det,c_Date,c_Charge,c_Qty,c_Total,c_Notes] if c]
             first_col, last_col = min(table_cols), max(table_cols)
@@ -513,11 +531,13 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 for c in range(first_col, last_col + 1):
                     ws.cell(r, c).border = dotted_b
 
+            # ---------- Summary block ----------
             ACC = ACC_FMT
             sum_col = c_Total if c_Total else c_Charge
             if sum_col:
                 sum_rng = f"{get_column_letter(sum_col)}{start_row}:{get_column_letter(sum_col)}{last_row}"
 
+                # Detect label column from "Total Package"
                 label_col = None
                 for c in range(1, ws.max_column + 1):
                     for rr in range(last_row + 1, min(ws.max_row, last_row + 200) + 1):
@@ -528,12 +548,13 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     if label_col:
                         break
                 if not label_col:
-                    label_col = 8
+                    label_col = 8  # fallback H if needed
 
                 value_col = label_col + 1
                 search_start = last_row + 1
                 search_end   = min(ws.max_row, last_row + 200)
 
+                # Total Package
                 r_tp, _ = _find_label_in_column(ws, "Total Package", label_col, search_start, search_end)
                 tp_coord = None
                 if r_tp:
@@ -542,6 +563,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     tp_cell.number_format = ACC
                     tp_coord = tp_cell.coordinate
 
+                # Discount
                 r_disc, _ = _find_label_in_column(ws, "Discount", label_col, search_start, search_end)
                 disc_coord = None
                 if r_disc:
@@ -551,6 +573,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     disc_cell.number_format = ACC
                     disc_coord = disc_cell.coordinate
 
+                # Total Package Price = TP - Discount
                 r_tpp, _ = _find_label_in_column(ws, "Total Package Price", label_col, search_start, search_end)
                 tpp_coord = None
                 if r_tpp and tp_coord and disc_coord:
@@ -559,6 +582,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     tpp_cell.number_format = ACC
                     tpp_coord = tpp_cell.coordinate
 
+                # VAT = TPP / 5
                 r_vat, _ = _find_label_in_column(ws, "VAT", label_col, search_start, search_end)
                 vat_coord = None
                 if r_vat and tpp_coord:
@@ -567,6 +591,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     vat_cell.number_format = ACC
                     vat_coord = vat_cell.coordinate
 
+                # OPP = TPP + VAT
                 r_opp, _ = _find_label_in_column(ws, "Overall Package Price", label_col, search_start, search_end)
                 if not r_opp and r_vat:
                     r_opp = r_vat + 2
@@ -575,7 +600,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     opp_cell.value = f"={tpp_coord}+{vat_coord}"
                     opp_cell.number_format = ACC
 
-            # Notes box
+            # ---------- Long "Notes" box ----------
             notes_text = ""
             if '_notes_long_' in dfp.columns:
                 notes_text = "\n\n".join(
@@ -592,7 +617,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             if notes_text:
                 found_r = None
                 for rr in range(last_row + 1, min(ws.max_row, last_row + 300) + 1):
-                    v = ws.cell(rr, 2).value  # column B
+                    v = ws.cell(rr, 2).value  # column B = 2
                     if isinstance(v, str) and _canon_label(v) == "notes":
                         found_r = rr
                         break
@@ -602,6 +627,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                         ws.cell(target_r, cc).value = notes_text
                         break
 
+            # Save provider file into zip
             out_bytes = BytesIO()
             wb.save(out_bytes)
             out_bytes.seek(0)
@@ -617,6 +643,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
 st.set_page_config(page_title="MOF Automation", layout="wide")
 st.title("MOF Automation")
 
+# Button styles (red submit, green download)
 st.markdown("""
 <style>
 div.stButton > button:first-child { background-color: #d90429 !important; color: white !important; }
@@ -656,12 +683,15 @@ if mode == "Wishlist":
                     st.exception(e)
                     st.stop()
 
+                # Build results.zip with templates + cleaned data
                 zip_buf = BytesIO()
                 with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    # cleaned_output.xlsx
                     cleaned_bytes = BytesIO()
                     cleaned.to_excel(cleaned_bytes, index=False)
                     zf.writestr("data/cleaned_output.xlsx", cleaned_bytes.getvalue())
 
+                    # templates/*
                     try:
                         template_bytes = template_file.read()
                         tpl_zip = _populate_template_bytes(template_bytes, cleaned, costs_df)
@@ -674,6 +704,7 @@ if mode == "Wishlist":
                 zip_buf.seek(0)
                 st.success(f"Done. Cleaned {len(cleaned)} rows.")
 
+                # Missing costs warning
                 missing_costs = cleaned['Cost'].isna().sum()
                 if missing_costs > 0:
                     st.warning(f"{missing_costs} row(s) have no Cost match by Product. Ensure Product exists in the MOF Cost Sheet.")
@@ -712,6 +743,7 @@ else:
                     st.exception(e)
                     st.stop()
 
+                # Build results.zip with templates only
                 zip_buf = BytesIO()
                 with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
                     try:
