@@ -50,6 +50,10 @@ TYPE_TO_PRODUCT = {
     "Training Video": "Online training video (provider produces and edits)",
     "Video adverts": "Video advert",
     "Product Focus emails": "Product Focus emails",
+
+    # === New explicit 1:1 mappings you asked for ===
+    "Compliance Webinar Sponsorship": "Compliance Webinar Sponsorship",
+    "Full Adviser Site Takeover (Network and DA Club)": "Full Adviser Site Takeover (Network and DA Club)",
 }
 _TYPE_OVERRIDE_LC = {k.casefold().strip(): v for k, v in TYPE_TO_PRODUCT.items()}
 
@@ -124,10 +128,24 @@ def _is_event_label(x):
     if re.search(r'\d', s): return True
     return False
 
+# Simple location normaliser used for Regional Roadshow special-case
+_LOCATION_SET = {
+    "north","south","east","west","midlands","central","scotland","wales","northern ireland",
+    "north east","north west","south east","south west","london","yorkshire","humberside"
+}
+def _looks_like_location(s: str) -> bool:
+    if not isinstance(s, str): s = str(s or "")
+    return s.strip().casefold() in _LOCATION_SET
+
 def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     """
     Parse Zoho's wide export (row 0 = subheaders) → long rows,
     then join Cost (+F2F) and include the new repeated fields.
+
+    Changes:
+      * Product lookups to MOF Cost are by Product only (not Type+Product).
+      * Special handling for "Regional Roadshow Event (...)" so locations go to Event Date.
+      * Type→Product overrides applied BEFORE cost merge.
     """
     if form_df.shape[0] < 2:
         return pd.DataFrame(columns=REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?'])
@@ -203,37 +221,56 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     # Thin to our key outputs before joining cost
     out = out[['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product']].copy()
 
-    # ---- Join Cost (+ F2F) ----
+    # ---------- Special handling: Regional Roadshow Events ----------
+    def _is_regional_roadshow(t: str) -> bool:
+        if not isinstance(t, str): t = str(t or "")
+        t_l = t.casefold()
+        return t_l.startswith("regional roadshow event (february)") or \
+               t_l.startswith("regional roadshow event (june)") or \
+               t_l.startswith("regional roadshow event (september/october)") or \
+               t_l.startswith("regional roadshow event")
+
+    mask_rre = out['Type'].apply(_is_regional_roadshow).fillna(False)
+    if mask_rre.any():
+        # Move location-like Products into the Event Date field (if it's empty/NA),
+        # leaving Product free for the actual offering lines (Presenter, Stand Only, etc).
+        loc_mask = mask_rre & out['Product'].apply(_looks_like_location)
+        need_date = loc_mask & (out['Event Date (if applicable)'].isna() | (out['Event Date (if applicable)'].astype(str).str.strip() == ""))
+        out.loc[need_date, 'Event Date (if applicable)'] = out.loc[need_date, 'Product']
+        # When the row was purely a location line, clear Product so it won't try to cost-match.
+        out.loc[need_date, 'Product'] = None
+
+    # ---------- Apply Type->Product overrides BEFORE cost merge ----------
+    out = _apply_type_overrides(out)
+
+    # ---- Join Cost (+ F2F) by PRODUCT ONLY ----
     def _norm(s): return None if pd.isna(s) else str(s).strip()
-    if not set(['Type','Product','Cost']).issubset(costs_df.columns):
-        raise ValueError("Cost sheet must contain columns: Type, Product, Cost")
+    if 'Product' not in costs_df.columns or 'Cost' not in costs_df.columns:
+        raise ValueError("Cost sheet must contain columns: Product, Cost (Type optional but ignored for lookup)")
 
     costs2 = costs_df.copy()
-    costs2['Type_norm'] = costs2['Type'].apply(_norm)
     costs2['Product_norm'] = costs2['Product'].apply(_norm)
 
-    out['Type_norm'] = out['Type'].apply(_norm)
-    out['Product_norm'] = out['Product'].apply(_norm)
-
-    bring_cols = ['Type_norm','Product_norm','Cost']
+    # Deduplicate costs on Product to avoid exploding joins
+    bring_cols = ['Product_norm','Cost']
     f2f_col_name = None
     for cand in ['F2F or Online?', 'F2F or Online', 'F2F/Online']:
         if cand in costs2.columns:
             bring_cols.append(cand)
             f2f_col_name = cand
             break
+    costs2 = costs2[bring_cols].drop_duplicates(subset=['Product_norm'], keep='first')
 
-    out = out.merge(costs2[bring_cols], on=['Type_norm','Product_norm'], how='left') \
-             .drop(columns=['Type_norm','Product_norm'])
+    out['Product_norm'] = out['Product'].apply(_norm)
 
-    # Apply Type→Product overrides
-    out = _apply_type_overrides(out)
+    out = out.merge(costs2, on=['Product_norm'], how='left').drop(columns=['Product_norm'])
 
     # Final column order
     final_cols = REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost']
     if f2f_col_name:
         out = out.rename(columns={f2f_col_name: 'F2F or Online?'})
         final_cols += ['F2F or Online?']
+
     out = out[final_cols].sort_values(['Random ID','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
 
     return out
@@ -302,7 +339,7 @@ def transform_confirmed(confirmed_df: pd.DataFrame) -> pd.DataFrame:
         'Cost': confirmed_df[c_cost],
         'F2F or Online?': confirmed_df[c_f2f] if c_f2f else "",
     })
-    # Apply overrides
+    # Apply overrides (kept here too in case someone pastes odd "Type" into confirmed sheet)
     out = _apply_type_overrides(out)
     # Keep order
     final_cols = REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?']
@@ -386,7 +423,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
 
     zip_buf = BytesIO()
     dotted = Side(style='dotted')
-    header_font = Font(name="Segoe UI", size=12, bold=True, color="000000")  # headers are orange with white text in template; we only set font
+    header_font = Font(name="Segoe UI", size=12, bold=True, color="000000")
     ACC_FMT = '_-£* #,##0.00_-;_-£* -#,##0.00_-;_-£* "-"??_-;_-@_-'
 
     with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -408,7 +445,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             ws['E6'] = em
 
             # Secondary contacts
-            def _first(dfcol): 
+            def _first(dfcol):
                 return (dfcol.iloc[0] if dfcol is not None and len(dfp) else "")
             if 'Events Name' in dfp.columns: ws['B10'] = _first(dfp['Events Name'])
             if 'Events Email' in dfp.columns: ws['B12'] = _first(dfp['Events Email'])
@@ -549,16 +586,13 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     opp_cell.value = f"={tpp_coord}+{vat_coord}"
                     opp_cell.number_format = ACC
 
-            # ---------- Long "Notes" box (merged B:D rows ~27–30) ----------
-            # We’ll locate the first cell in column B below the table that equals "Notes"
+            # ---------- Long "Notes" box ----------
             notes_text = ""
-            # Aggregate unique non-empty notes if present in cleaned
             if '_notes_long_' in dfp.columns:
                 notes_text = "\n\n".join(
                     [str(x).strip() for x in dfp['_notes_long_'].fillna("").unique() if str(x).strip()]
                 )
             else:
-                # Try any of the original headers if carried through
                 for cand in NOTES_SOURCE_HEADERS:
                     if cand in dfp.columns:
                         notes_text = "\n\n".join(
@@ -567,7 +601,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                         break
 
             if notes_text:
-                # Find a cell in column B, below the table, that contains the label "Notes"
                 found_r = None
                 for rr in range(last_row + 1, min(ws.max_row, last_row + 300) + 1):
                     v = ws.cell(rr, 2).value  # column B = 2
@@ -575,12 +608,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                         found_r = rr
                         break
                 if found_r:
-                    # the merged area is B?:D?; write into the cell at B?+1 (the body cell) if that's the layout,
-                    # else write into the cell to the right if label is in B and value area in C/D.
-                    # Here we assume the value area starts at column B as per your description;
-                    # If your label "Notes" is a header above the box, write in row+1 instead:
-                    target_r = found_r + 1 if _canon_label(ws.cell(found_r, 2).value) == "notes" else found_r
-                    # Pick the first blank cell in columns B..D at/under target
+                    target_r = found_r + 1
                     for cc in [2, 3, 4]:
                         ws.cell(target_r, cc).value = notes_text
                         break
@@ -665,7 +693,7 @@ if mode == "Wishlist":
                 # Missing costs warning
                 missing_costs = cleaned['Cost'].isna().sum()
                 if missing_costs > 0:
-                    st.warning(f"{missing_costs} row(s) have no Cost match. Ensure (Type, Product) exist in the MOF Cost Sheet.")
+                    st.warning(f"{missing_costs} row(s) have no Cost match by Product. Ensure Product exists in the MOF Cost Sheet.")
                     with st.expander("Preview rows missing Cost"):
                         st.dataframe(
                             cleaned[cleaned['Cost'].isna()][
