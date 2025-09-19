@@ -49,13 +49,11 @@ TYPE_TO_PRODUCT = {
     "Social Media Post Share": "Social Media Post",
     "Training Video": "Online training video (provider produces and edits)",
     "Video adverts": "Video advert",
-    # NEW:
-    "Product Focus Emails": "Product Focus emails",
+    "Product Focus emails": "Product Focus emails",
 }
 _TYPE_OVERRIDE_LC = {k.casefold().strip(): v for k, v in TYPE_TO_PRODUCT.items()}
 
 def _apply_type_overrides(df: pd.DataFrame) -> pd.DataFrame:
-    """Force Product based on Type using the override table (case-insensitive)."""
     if 'Type' not in df.columns or 'Product' not in df.columns:
         return df
     def _override(row):
@@ -66,9 +64,55 @@ def _apply_type_overrides(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ===========================
-# Wishlist Transformation Logic
+# Helper: loose column picker
 # ===========================
-ID_COLS = ['Random ID', 'Provider Name', 'Name', 'Phone', 'Email']
+def _pick(colnames, *candidates):
+    lowmap = {str(c).strip().lower(): c for c in colnames}
+    for cand in candidates:
+        if cand is None:
+            continue
+        key = str(cand).strip().lower()
+        if key in lowmap:
+            return lowmap[key]
+    # try contains-style (looser)
+    lc = [str(c).lower() for c in colnames]
+    for cand in candidates:
+        if not cand:
+            continue
+        ck = str(cand).strip().lower()
+        for i, name in enumerate(lc):
+            if ck == name:
+                return colnames[i]
+    return None
+
+# ===========================
+# Wishlist Transformation
+# ===========================
+# New repeated header set (in cleaned output)
+REPEATED_FIRST = [
+    'Random ID','Provider Name','Name','Phone','Email',
+    'Events Name','Events Email',
+    'Marketing Publications Name','Marketing Publications Email',
+    'Copy Name','Copy Email',
+    'When To Invoice',
+    'Invoice Name','Invoice Email',
+]
+
+# Try to carry the long free-text notes
+NOTES_SOURCE_HEADERS = [
+    "Please provide any further notes you may have or want to have considered with this form:",
+    "Further notes", "Any further notes"
+]
+
+# ID/admin-like columns we should copy from the Zoho wide export rows (case-insensitive match)
+ID_COLS_WISHLIST = [
+    'Random ID','Provider Name','Name','Phone','Email',
+    'Events Name','Events Email',
+    'Marketing Publications Name','Marketing Publications Email',
+    'Copy Name','Copy Email',
+    'When To Invoice',
+    'Invoice Name','Invoice Email',
+] + NOTES_SOURCE_HEADERS
 
 def _is_event_label(x):
     if pd.isna(x):
@@ -82,20 +126,25 @@ def _is_event_label(x):
 
 def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Convert Zoho's wide export to normalized rows and join:
-    - Cost (required) and
-    - F2F or Online? (optional, if present in MOF sheet)
-    Adds a fallback: if strict (Type, Product) join fails, fill by Product-only
-    when that product has a single unique price in the MOF sheet.
+    Parse Zoho's wide export (row 0 = subheaders) → long rows,
+    then join Cost (+F2F) and include the new repeated fields.
     """
     if form_df.shape[0] < 2:
-        return pd.DataFrame(columns=[
-            'Random ID','Provider Name','Name','Phone','Email',
-            'Type','Event Date (if applicable)','Product','Cost','F2F or Online?'
-        ])
+        return pd.DataFrame(columns=REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?'])
 
     subheaders = form_df.iloc[0]
     data_rows = form_df.iloc[1:].reset_index(drop=True)
+
+    # Normalize lookup for ID columns (case-insensitive)
+    col_lc_map = {str(c).strip().lower(): c for c in form_df.columns}
+    wanted_cols = [col_lc_map.get(c.lower()) for c in ID_COLS_WISHLIST if col_lc_map.get(c.lower())]
+    # Extract the free text notes column name, if present
+    notes_col = None
+    for cand in NOTES_SOURCE_HEADERS:
+        c = col_lc_map.get(cand.strip().lower())
+        if c:
+            notes_col = c
+            break
 
     records = []
     for ridx, row in data_rows.iterrows():
@@ -103,7 +152,8 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
         for j, col in enumerate(form_df.columns):
             val = row[col]
             if not str(col).startswith('Unnamed'):
-                if col not in ID_COLS and col not in ['Added Time','Referrer Name','Task Owner']:
+                # new "Type block" when we hit a titled column that's not admin/ID
+                if col not in wanted_cols and col not in ['Added Time','Referrer Name','Task Owner']:
                     current_type = col
             if pd.isna(val):
                 continue
@@ -112,7 +162,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
             text_val = str(val).strip()
 
             if not str(col).startswith('Unnamed'):
-                if col in ID_COLS or col in ['Added Time','Referrer Name','Task Owner']:
+                if col in wanted_cols or col in ['Added Time','Referrer Name','Task Owner']:
                     continue
                 if re.search(r'\boption(s)?\b', text_val, flags=re.I) and not pd.isna(sub):
                     prod = str(sub).strip()
@@ -142,20 +192,21 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
 
     out = pd.DataFrame.from_records(records)
 
-    # Attach ID columns
-    for c in ID_COLS:
-        out[c] = out['_ridx'].map(data_rows[c]) if c in data_rows.columns else None
+    # Attach repeated fields from data_rows
+    for c in REPEATED_FIRST + ([notes_col] if notes_col else []):
+        if c and c in data_rows.columns:
+            out[c] = out['_ridx'].map(data_rows[c])
+        else:
+            if c in REPEATED_FIRST:
+                out[c] = None
 
-    out = out[['Random ID','Provider Name','Name','Phone','Email',
-               'Type','Event Date (if applicable)','Product']]
+    # Thin to our key outputs before joining cost
+    out = out[['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product']].copy()
 
-    # ---- Join Cost (+ F2F/Online when present) with fallback ----
+    # ---- Join Cost (+ F2F) ----
     def _norm(s): return None if pd.isna(s) else str(s).strip()
     if not set(['Type','Product','Cost']).issubset(costs_df.columns):
         raise ValueError("Cost sheet must contain columns: Type, Product, Cost")
-
-    # Apply Type→Product overrides BEFORE joining to keep everything aligned with MOF
-    out = _apply_type_overrides(out)
 
     costs2 = costs_df.copy()
     costs2['Type_norm'] = costs2['Type'].apply(_norm)
@@ -172,103 +223,96 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
             f2f_col_name = cand
             break
 
-    # 1) Strict (Type, Product)
-    out = out.merge(costs2[bring_cols], on=['Type_norm','Product_norm'], how='left')
+    out = out.merge(costs2[bring_cols], on=['Type_norm','Product_norm'], how='left') \
+             .drop(columns=['Type_norm','Product_norm'])
 
-    # 2) Fallback by Product-only when unique price across MOF
-    prod_groups = costs2.groupby('Product_norm', dropna=False)
-    unique_prod_mask = (prod_groups['Cost'].nunique() == 1)
-    unique_products = unique_prod_mask[unique_prod_mask].index
-    prod_only = costs2[costs2['Product_norm'].isin(unique_products)].copy()
+    # Apply Type→Product overrides
+    out = _apply_type_overrides(out)
 
-    prod_only_keep = ['Product_norm','Cost']
-    if f2f_col_name:
-        prod_only_keep.append(f2f_col_name)
-    prod_only = prod_only[prod_only_keep].drop_duplicates(subset=['Product_norm'])
-
-    need = out['Cost'].isna()
-    if need.any():
-        fill_df = out.loc[need, ['Product_norm']].merge(
-            prod_only, on='Product_norm', how='left'
-        )
-        out.loc[need, 'Cost'] = fill_df['Cost'].values
-        if f2f_col_name and f2f_col_name in fill_df.columns:
-            need_f2f = need & out.get(f2f_col_name, pd.Series([None]*len(out))).isna()
-            out.loc[need_f2f, f2f_col_name] = fill_df[f2f_col_name].values
-
-    # Clean temp cols & finalize columns
-    out = out.drop(columns=['Type_norm','Product_norm'])
-    base_cols = ['Random ID','Provider Name','Name','Phone','Email',
-                 'Type','Event Date (if applicable)','Product','Cost']
+    # Final column order
+    final_cols = REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost']
     if f2f_col_name:
         out = out.rename(columns={f2f_col_name: 'F2F or Online?'})
-        base_cols.append('F2F or Online?')
+        final_cols += ['F2F or Online?']
+    out = out[final_cols].sort_values(['Random ID','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
 
-    out = out.reindex(columns=[c for c in base_cols if c in out.columns])
-    out = out.sort_values(['Random ID','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
     return out
 
 # ===========================
 # Confirmed Items Transform
 # ===========================
-def _pick(colnames, *candidates):
-    """Return the first matching column name (case-insensitive, trimmed)."""
-    lowmap = {str(c).strip().lower(): c for c in colnames}
-    for cand in candidates:
-        if cand is None:
-            continue
-        key = str(cand).strip().lower()
-        if key in lowmap:
-            return lowmap[key]
-    return None
-
 def transform_confirmed(confirmed_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Map the confirmed-export into the same 'cleaned' shape expected by the template writer:
-      Provider Name, Name, Phone, Email, Type, Event Date (if applicable), Product, Cost, F2F or Online?
-    """
     cols = list(confirmed_df.columns)
 
-    c_provider = _pick(cols, "Provider Name", "Provider")
-    c_contact  = _pick(cols, "Contact Name for Content", "Main Contact", "Contact Name")
-    c_email    = _pick(cols, "Contact Email", "Email")
-    c_phone    = _pick(cols, "Contact Phone Number", "Phone")
-    c_type     = _pick(cols, "Type Of Event", "Type of Event", "Type")
-    c_product  = _pick(cols, "Product Ordered", "Product")
-    c_month    = _pick(cols, "Event Date (If Applicable)", "Event Date (if applicable)", "Month")
-    c_f2f      = _pick(cols, "F2F or Online?", "F2F or Online", "F2F/Online")
-    c_cost     = _pick(cols, "Product Cost", "Cost", "Charge")
+    # Repeated fields
+    c_rand   = _pick(cols, "Random ID","RandomID","ID")
+    c_prov   = _pick(cols, "Provider Name","Provider")
+    c_name   = _pick(cols, "Name","Main Contact","Contact Name for Content")
+    c_phone  = _pick(cols, "Phone","Contact Phone Number")
+    c_email  = _pick(cols, "Email","Contact Email")
 
-    missing = [lab for lab, col in [
-        ("Provider Name", c_provider),
-        ("Contact Name for Content", c_contact),
-        ("Contact Email", c_email),
-        ("Contact Phone Number", c_phone),
-        ("Type Of Event", c_type),
-        ("Product Ordered", c_product),
-        ("Product Cost", c_cost)
-    ] if col is None]
+    c_ev_n   = _pick(cols, "Events Name")
+    c_ev_e   = _pick(cols, "Events Email")
+    c_mp_n   = _pick(cols, "Marketing Publications Name")
+    c_mp_e   = _pick(cols, "Marketing Publications Email")
+    c_cp_n   = _pick(cols, "Copy Name")
+    c_cp_e   = _pick(cols, "Copy Email")
+    c_wti    = _pick(cols, "When To Invoice","When to Invoice")
+    c_inv_n  = _pick(cols, "Invoice Name")
+    c_inv_e  = _pick(cols, "Invoice Email")
 
-    if missing:
-        raise ValueError(f"Confirmed list is missing required columns: {', '.join(missing)}")
+    # Line fields
+    c_type   = _pick(cols, "Type Of Event","Type of Event","Type")
+    c_prod   = _pick(cols, "Product Ordered","Product")
+    c_month  = _pick(cols, "Event Date (If Applicable)","Event Date (if applicable)","Month","Date")
+    c_cost   = _pick(cols, "Product Cost","Cost","Charge")
+    c_f2f    = _pick(cols, "F2F or Online?","F2F or Online","F2F/Online")
+
+    # Notes long text (optional)
+    notes_col = _pick(cols, *NOTES_SOURCE_HEADERS)
+
+    required = [
+        ("Provider Name", c_prov),
+        ("Type", c_type),
+        ("Product", c_prod),
+        ("Cost", c_cost),
+    ]
+    miss = [lab for lab, col in required if col is None]
+    if miss:
+        raise ValueError(f"Confirmed list missing required columns: {', '.join(miss)}")
 
     out = pd.DataFrame({
-        'Provider Name': confirmed_df[c_provider],
-        'Name': confirmed_df[c_contact].astype(str).str.replace(',', ' ', regex=False).str.replace(r'\s+', ' ', regex=True).str.strip(),
-        'Phone': confirmed_df[c_phone],
-        'Email': confirmed_df[c_email],
+        'Random ID': confirmed_df[c_rand] if c_rand else "",
+        'Provider Name': confirmed_df[c_prov],
+        'Name': confirmed_df[c_name] if c_name else "",
+        'Phone': confirmed_df[c_phone] if c_phone else "",
+        'Email': confirmed_df[c_email] if c_email else "",
+        'Events Name': confirmed_df[c_ev_n] if c_ev_n else "",
+        'Events Email': confirmed_df[c_ev_e] if c_ev_e else "",
+        'Marketing Publications Name': confirmed_df[c_mp_n] if c_mp_n else "",
+        'Marketing Publications Email': confirmed_df[c_mp_e] if c_mp_e else "",
+        'Copy Name': confirmed_df[c_cp_n] if c_cp_n else "",
+        'Copy Email': confirmed_df[c_cp_e] if c_cp_e else "",
+        'When To Invoice': confirmed_df[c_wti] if c_wti else "",
+        'Invoice Name': confirmed_df[c_inv_n] if c_inv_n else "",
+        'Invoice Email': confirmed_df[c_inv_e] if c_inv_e else "",
         'Type': confirmed_df[c_type],
         'Event Date (if applicable)': confirmed_df[c_month] if c_month else "",
-        'Product': confirmed_df[c_product],
+        'Product': confirmed_df[c_prod],
         'Cost': confirmed_df[c_cost],
-        'F2F or Online?': confirmed_df[c_f2f] if c_f2f else ""
+        'F2F or Online?': confirmed_df[c_f2f] if c_f2f else "",
     })
-
-    # Apply Type→Product overrides (includes Product Focus Emails → Product Focus emails)
+    # Apply overrides
     out = _apply_type_overrides(out)
-
-    out = out.sort_values(['Provider Name','Type','Event Date (if applicable)','Product'],
-                          na_position='last').reset_index(drop=True)
+    # Keep order
+    final_cols = REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?']
+    out = out[final_cols].sort_values(['Provider Name','Type','Event Date (if applicable)','Product'],
+                                      na_position='last').reset_index(drop=True)
+    # Keep notes as attribute for template stage (aggregate later)
+    if notes_col:
+        out['_notes_long_'] = confirmed_df[notes_col]
+    else:
+        out['_notes_long_'] = ""
     return out
 
 # ===========================
@@ -329,10 +373,10 @@ def _first_value_cell_right(ws, r, c, try_two=True):
     return ws.cell(r, c + 1)
 
 # ===========================
-# Template population (shared)
+# Template population (shared) — NEW template layout
 # ===========================
 def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame | None) -> BytesIO:
-    # Optional F2F mapping from cost sheet (for Wishlist mode)
+    # Build a product->F2F map if we have a cost sheet (Wishlist mode)
     f2f_map = {}
     if costs_df is not None and 'F2F or Online?' in costs_df.columns:
         def _n(s): return None if pd.isna(s) else str(s).strip()
@@ -342,7 +386,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
 
     zip_buf = BytesIO()
     dotted = Side(style='dotted')
-    header_font = Font(name="Segoe UI", size=12, bold=True, color="FFFFFF")
+    header_font = Font(name="Segoe UI", size=12, bold=True, color="000000")  # headers are orange with white text in template; we only set font
     ACC_FMT = '_-£* #,##0.00_-;_-£* -#,##0.00_-;_-£* "-"??_-;_-@_-'
 
     with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -350,35 +394,47 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             wb = load_workbook(BytesIO(template_bytes))
             ws = wb.active
 
-            # Fixed fields (from cleaned df columns)
-            provider_val = "" if pd.isna(provider) else str(provider)
-            name_val = _sanitize_name(dfp['Name'].iloc[0] if 'Name' in dfp.columns and len(dfp) > 0 else "")
-            phone_val = "" if 'Phone' not in dfp.columns else ("" if pd.isna(dfp['Phone'].iloc[0]) else str(dfp['Phone'].iloc[0]))
-            email_val = "" if 'Email' not in dfp.columns else ("" if pd.isna(dfp['Email'].iloc[0]) else str(dfp['Email'].iloc[0]))
-            ws["B7"]  = provider_val
-            ws["B9"]  = name_val
-            ws["G9"]  = phone_val
-            ws["I9"]  = email_val
-            ws["B11"] = email_val
-            ws["I15"] = email_val
+            # Fixed cells (new positions)
+            prov = "" if pd.isna(provider) else str(provider)
+            nm   = _sanitize_name(dfp['Name'].iloc[0] if 'Name' in dfp.columns and len(dfp) else "")
+            ph   = "" if 'Phone' not in dfp.columns else ("" if pd.isna(dfp['Phone'].iloc[0]) else str(dfp['Phone'].iloc[0]))
+            em   = "" if 'Email' not in dfp.columns else ("" if pd.isna(dfp['Email'].iloc[0]) else str(dfp['Email'].iloc[0]))
+            wti  = dfp['When To Invoice'].iloc[0] if 'When To Invoice' in dfp.columns else ""
 
-            # Table location
+            ws['B4'] = prov
+            ws['B6'] = nm
+            ws['D4'] = wti
+            ws['D6'] = ph
+            ws['E6'] = em
+
+            # Secondary contacts
+            def _first(dfcol): 
+                return (dfcol.iloc[0] if dfcol is not None and len(dfp) else "")
+            if 'Events Name' in dfp.columns: ws['B10'] = _first(dfp['Events Name'])
+            if 'Events Email' in dfp.columns: ws['B12'] = _first(dfp['Events Email'])
+            if 'Marketing Publications Name' in dfp.columns: ws['D10'] = _first(dfp['Marketing Publications Name'])
+            if 'Marketing Publications Email' in dfp.columns: ws['D12'] = _first(dfp['Marketing Publications Email'])
+            if 'Invoice Name' in dfp.columns: ws['F10'] = _first(dfp['Invoice Name'])
+            if 'Invoice Email' in dfp.columns: ws['F12'] = _first(dfp['Invoice Email'])
+            if 'Copy Name' in dfp.columns: ws['H10'] = _first(dfp['Copy Name'])
+            if 'Copy Email' in dfp.columns: ws['H12'] = _first(dfp['Copy Email'])
+
+            # Find table header
             hdr_row, hdr_col, hmap = _find_table_header_row(ws)
             c_Type   = _get_col(hmap, "Type")
             c_Prod   = _get_col(hmap, "Product")
-            c_Month  = _get_col(hmap, "Month", aliases=("Event Month","Month of"))
+            c_Det    = _get_col(hmap, "Details")
             c_Date   = _get_col(hmap, "Date")
-            c_F2F    = _get_col(hmap, "F2F or Online?", aliases=("F2F or Online","F2F/Online"))
-            c_Qty    = _get_col(hmap, "Qty", aliases=("Quantity",))
             c_Charge = _get_col(hmap, "Charge", aliases=("Cost","Price"))
+            c_Qty    = _get_col(hmap, "Qty", aliases=("Quantity",))
             c_Total  = _get_col(hmap, "Total")
             c_Notes  = _get_col(hmap, "Notes")
-            c_When   = _get_col(hmap, "When to Invoice", aliases=("When To Invoice","When-to-Invoice"))
 
-            # Header styling
-            for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When]:
+            # Make header font bold (optional)
+            for c in [c_Type,c_Prod,c_Det,c_Date,c_Charge,c_Qty,c_Total,c_Notes]:
                 if c: ws.cell(hdr_row, c).font = header_font
 
+            # Insert rows for n items
             start_row = hdr_row + 1
             n = len(dfp)
             if n > 1:
@@ -389,20 +445,21 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 rr = start_row + i
                 typ   = r.get("Type", "")
                 prod  = r.get("Product", "")
-                month = r.get("Event Date (if applicable)", "")
-                qty   = 1
+                datev = r.get("Event Date (if applicable)", "")
                 charge = r.get("Cost", None)
-                prod_key = None if pd.isna(prod) else str(prod).strip()
-                f2f_val = r.get("F2F or Online?", "")
-                if not f2f_val and prod_key in f2f_map:
-                    f2f_val = f2f_map.get(prod_key, "")
+                qty = 1
+                # Details column: F2F/Online (from cleaned or fallback from cost map)
+                details = r.get("F2F or Online?", "")
+                if not details:
+                    pk = None if pd.isna(prod) else str(prod).strip()
+                    if pk in f2f_map:
+                        details = f2f_map.get(pk, "")
 
-                if c_Type:   ws.cell(rr, c_Type,   typ)
-                if c_Prod:   ws.cell(rr, c_Prod,   prod)
-                if c_Month:  ws.cell(rr, c_Month,  month)
-                if c_Date:   ws.cell(rr, c_Date,   None)
-                if c_F2F:    ws.cell(rr, c_F2F,    f2f_val)
-                if c_Qty:    ws.cell(rr, c_Qty,    qty)
+                if c_Type:   ws.cell(rr, c_Type, typ)
+                if c_Prod:   ws.cell(rr, c_Prod, prod)
+                if c_Det:    ws.cell(rr, c_Det, details)
+                if c_Date:   ws.cell(rr, c_Date, datev)
+                if c_Qty:    ws.cell(rr, c_Qty, qty)
                 if c_Charge:
                     ws.cell(rr, c_Charge, charge).number_format = ACC_FMT
                 if c_Total:
@@ -411,25 +468,23 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     except Exception:
                         total_val = None
                     ws.cell(rr, c_Total, total_val).number_format = ACC_FMT
+                if c_Notes:
+                    ws.cell(rr, c_Notes, None)
 
-            # Borders + font across full table width
+            # Borders across table (dotted)
             last_row = start_row + max(n - 1, 0)
-            table_cols = [c for c in [c_Type,c_Prod,c_Month,c_Date,c_F2F,c_Qty,c_Charge,c_Total,c_Notes,c_When] if c]
-            if not table_cols: table_cols = [hdr_col, hdr_col+1]
+            table_cols = [c for c in [c_Type,c_Prod,c_Det,c_Date,c_Charge,c_Qty,c_Total,c_Notes] if c]
             first_col, last_col = min(table_cols), max(table_cols)
-            for c in range(first_col, last_col + 1):
-                ws.cell(hdr_row, c).border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
-            for r in range(start_row, last_row + 1):
+            dotted_b = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
+            for r in range(hdr_row, last_row + 1):
                 for c in range(first_col, last_col + 1):
-                    cell = ws.cell(r, c)
-                    cell.border = Border(top=dotted, bottom=dotted, left=dotted, right=dotted)
-                    cell.font = Font(name="Segoe UI", size=10)
+                    ws.cell(r, c).border = dotted_b
 
-            # ---------- Summary block (OPP = TPP + VAT) ----------
+            # ---------- Summary block (labels to the left, values to the right) ----------
             ACC = ACC_FMT
-            total_col = c_Total if c_Total else c_Charge
-            if total_col:
-                sum_rng = f"{get_column_letter(total_col)}{start_row}:{get_column_letter(total_col)}{last_row}"
+            sum_col = c_Total if c_Total else c_Charge
+            if sum_col:
+                sum_rng = f"{get_column_letter(sum_col)}{start_row}:{get_column_letter(sum_col)}{last_row}"
 
                 # Detect label column from "Total Package"
                 label_col = None
@@ -442,7 +497,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     if label_col:
                         break
                 if not label_col:
-                    label_col = 9  # fallback to I
+                    label_col = 8  # fallback H if needed
 
                 value_col = label_col + 1
                 search_start = last_row + 1
@@ -485,7 +540,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     vat_cell.number_format = ACC
                     vat_coord = vat_cell.coordinate
 
-                # OPP row: try to locate by label; if not found, place 2 rows beneath VAT
+                # OPP = TPP + VAT
                 r_opp, _ = _find_label_in_column(ws, "Overall Package Price", label_col, search_start, search_end)
                 if not r_opp and r_vat:
                     r_opp = r_vat + 2
@@ -494,11 +549,47 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     opp_cell.value = f"={tpp_coord}+{vat_coord}"
                     opp_cell.number_format = ACC
 
-            # Save workbook into ZIP
+            # ---------- Long "Notes" box (merged B:D rows ~27–30) ----------
+            # We’ll locate the first cell in column B below the table that equals "Notes"
+            notes_text = ""
+            # Aggregate unique non-empty notes if present in cleaned
+            if '_notes_long_' in dfp.columns:
+                notes_text = "\n\n".join(
+                    [str(x).strip() for x in dfp['_notes_long_'].fillna("").unique() if str(x).strip()]
+                )
+            else:
+                # Try any of the original headers if carried through
+                for cand in NOTES_SOURCE_HEADERS:
+                    if cand in dfp.columns:
+                        notes_text = "\n\n".join(
+                            [str(x).strip() for x in dfp[cand].fillna("").unique() if str(x).strip()]
+                        )
+                        break
+
+            if notes_text:
+                # Find a cell in column B, below the table, that contains the label "Notes"
+                found_r = None
+                for rr in range(last_row + 1, min(ws.max_row, last_row + 300) + 1):
+                    v = ws.cell(rr, 2).value  # column B = 2
+                    if isinstance(v, str) and _canon_label(v) == "notes":
+                        found_r = rr
+                        break
+                if found_r:
+                    # the merged area is B?:D?; write into the cell at B?+1 (the body cell) if that's the layout,
+                    # else write into the cell to the right if label is in B and value area in C/D.
+                    # Here we assume the value area starts at column B as per your description;
+                    # If your label "Notes" is a header above the box, write in row+1 instead:
+                    target_r = found_r + 1 if _canon_label(ws.cell(found_r, 2).value) == "notes" else found_r
+                    # Pick the first blank cell in columns B..D at/under target
+                    for cc in [2, 3, 4]:
+                        ws.cell(target_r, cc).value = notes_text
+                        break
+
+            # Save provider file into zip
             out_bytes = BytesIO()
             wb.save(out_bytes)
             out_bytes.seek(0)
-            safe_provider = re.sub(r'[^A-Za-z0-9 _.-]+', '_', provider or "Unknown_Provider")
+            safe_provider = re.sub(r'[^A-Za-z0-9 _.-]+', '_', prov or "Unknown_Provider")
             zf.writestr(f"templates/{safe_provider}.xlsx", out_bytes.getvalue())
 
     zip_buf.seek(0)
@@ -513,14 +604,8 @@ st.title("MOF Automation")
 # Button styles (red submit, green download)
 st.markdown("""
 <style>
-div.stButton > button:first-child {
-    background-color: #d90429 !important;
-    color: white !important;
-}
-div.stDownloadButton > button:first-child {
-    background-color: #2a9d8f !important;
-    color: white !important;
-}
+div.stButton > button:first-child { background-color: #d90429 !important; color: white !important; }
+div.stDownloadButton > button:first-child { background-color: #2a9d8f !important; color: white !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -541,11 +626,11 @@ if mode == "Wishlist":
     with c2:
         cost_file = st.file_uploader("MOF Cost Sheet (.csv/.xlsx/.xls)", type=["csv","xlsx","xls","txt"], key="cost_wishlist")
     with c3:
-        template_file = st.file_uploader("Template (Excel)", type=["xlsx","xls"], key="tpl_wishlist")
+        template_file = st.file_uploader("New Template (Excel)", type=["xlsx","xls"], key="tpl_wishlist")
 
     if st.button("Submit", key="submit_wishlist"):
         if not form_file or not cost_file or not template_file:
-            st.error("Please upload the Zoho Forms export, MOF Cost Sheet, and Template.")
+            st.error("Please upload the Zoho Forms export, MOF Cost Sheet, and the new Template.")
         else:
             with st.spinner("Processing wishlist..."):
                 try:
@@ -576,6 +661,7 @@ if mode == "Wishlist":
 
                 zip_buf.seek(0)
                 st.success(f"Done. Cleaned {len(cleaned)} rows.")
+
                 # Missing costs warning
                 missing_costs = cleaned['Cost'].isna().sum()
                 if missing_costs > 0:
@@ -601,11 +687,11 @@ else:
     with c1:
         confirmed_file = st.file_uploader("Confirmed Items export (.csv/.xlsx/.xls)", type=["csv","xlsx","xls","txt"], key="confirmed_list")
     with c2:
-        template_file_c = st.file_uploader("Template (Excel)", type=["xlsx","xls"], key="tpl_confirmed")
+        template_file_c = st.file_uploader("New Template (Excel)", type=["xlsx","xls"], key="tpl_confirmed")
 
     if st.button("Submit", key="submit_confirmed"):
         if not confirmed_file or not template_file_c:
-            st.error("Please upload the Confirmed Items export and the Template.")
+            st.error("Please upload the Confirmed Items export and the new Template.")
         else:
             with st.spinner("Processing confirmed items..."):
                 try:
