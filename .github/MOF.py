@@ -51,7 +51,7 @@ TYPE_TO_PRODUCT = {
     "Video adverts": "Video advert",
     "Product Focus emails": "Product Focus emails",
 
-    # === New explicit 1:1 mappings you asked for ===
+    # Explicit 1:1 mappings requested
     "Compliance Webinar Sponsorship": "Compliance Webinar Sponsorship",
     "Full Adviser Site Takeover (Network and DA Club)": "Full Adviser Site Takeover (Network and DA Club)",
 }
@@ -78,7 +78,6 @@ def _pick(colnames, *candidates):
         key = str(cand).strip().lower()
         if key in lowmap:
             return lowmap[key]
-    # try contains-style (looser)
     lc = [str(c).lower() for c in colnames]
     for cand in candidates:
         if not cand:
@@ -92,7 +91,6 @@ def _pick(colnames, *candidates):
 # ===========================
 # Wishlist Transformation
 # ===========================
-# New repeated header set (in cleaned output)
 REPEATED_FIRST = [
     'Random ID','Provider Name','Name','Phone','Email',
     'Events Name','Events Email',
@@ -102,13 +100,11 @@ REPEATED_FIRST = [
     'Invoice Name','Invoice Email',
 ]
 
-# Try to carry the long free-text notes
 NOTES_SOURCE_HEADERS = [
     "Please provide any further notes you may have or want to have considered with this form:",
     "Further notes", "Any further notes"
 ]
 
-# ID/admin-like columns we should copy from the Zoho wide export rows (case-insensitive match)
 ID_COLS_WISHLIST = [
     'Random ID','Provider Name','Name','Phone','Email',
     'Events Name','Events Email',
@@ -128,14 +124,30 @@ def _is_event_label(x):
     if re.search(r'\d', s): return True
     return False
 
-# Simple location normaliser used for Regional Roadshow special-case
+# ===== Regional Roadshow helpers =====
+_RRE_OPTION_SET = {
+    "keynote presenter / panellist",
+    "roundtable presenter",
+    "stand only",
+}
 _LOCATION_SET = {
-    "north","south","east","west","midlands","central","scotland","wales","northern ireland",
-    "north east","north west","south east","south west","london","yorkshire","humberside"
+    "north","south","east","west","midlands","central","scotland","wales","wales/bristol","wales / bristol",
+    "northern ireland","north east","north west","south east","south west","london",
+    "yorkshire","humberside","solihull","bristol"
 }
 def _looks_like_location(s: str) -> bool:
     if not isinstance(s, str): s = str(s or "")
     return s.strip().casefold() in _LOCATION_SET
+
+def _is_rre_type(t: str) -> bool:
+    if not isinstance(t, str): t = str(t or "")
+    t = t.casefold().strip()
+    return t.startswith("regional roadshow event")
+
+def _is_unchecked(v) -> bool:
+    if pd.isna(v): return True
+    s = str(v).strip().casefold()
+    return s in {"", "no", "false", "0", "none", "n/a", "na"}
 
 def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -144,7 +156,10 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
 
     Changes:
       * Product lookups to MOF Cost are by Product only (not Type+Product).
-      * Special handling for "Regional Roadshow Event (...)" so locations go to Event Date.
+      * Regional Roadshow Event handling:
+           - sub-header (region) → Event Date
+           - cell value (option picked) → Product
+           - skip blanks/unchecked
       * Type→Product overrides applied BEFORE cost merge.
     """
     if form_df.shape[0] < 2:
@@ -153,10 +168,9 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     subheaders = form_df.iloc[0]
     data_rows = form_df.iloc[1:].reset_index(drop=True)
 
-    # Normalize lookup for ID columns (case-insensitive)
     col_lc_map = {str(c).strip().lower(): c for c in form_df.columns}
     wanted_cols = [col_lc_map.get(c.lower()) for c in ID_COLS_WISHLIST if col_lc_map.get(c.lower())]
-    # Extract the free text notes column name, if present
+
     notes_col = None
     for cand in NOTES_SOURCE_HEADERS:
         c = col_lc_map.get(cand.strip().lower())
@@ -169,8 +183,8 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
         current_type = None
         for j, col in enumerate(form_df.columns):
             val = row[col]
+            # establish/track the "Type" based on the main titled column
             if not str(col).startswith('Unnamed'):
-                # new "Type block" when we hit a titled column that's not admin/ID
                 if col not in wanted_cols and col not in ['Added Time','Referrer Name','Task Owner']:
                     current_type = col
             if pd.isna(val):
@@ -179,6 +193,18 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
             sub = subheaders.iloc[j] if j < len(subheaders) else None
             text_val = str(val).strip()
 
+            # ===== Special case: Regional Roadshow Event matrix =====
+            if current_type and _is_rre_type(current_type) and sub is not None and _looks_like_location(str(sub)):
+                if _is_unchecked(text_val):
+                    continue  # nothing selected for this region
+                # If the cell contains the option text, use it as Product
+                prod = text_val
+                evt = str(sub).strip()  # region into Event Date
+                records.append({'_ridx': ridx, 'Type': current_type,
+                                'Event Date (if applicable)': evt, 'Product': prod})
+                continue
+
+            # ===== Default behaviour for non-RRE cells =====
             if not str(col).startswith('Unnamed'):
                 if col in wanted_cols or col in ['Added Time','Referrer Name','Task Owner']:
                     continue
@@ -218,29 +244,14 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
             if c in REPEATED_FIRST:
                 out[c] = None
 
-    # Thin to our key outputs before joining cost
     out = out[['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product']].copy()
 
-    # ---------- Special handling: Regional Roadshow Events ----------
-    def _is_regional_roadshow(t: str) -> bool:
-        if not isinstance(t, str): t = str(t or "")
-        t_l = t.casefold()
-        return t_l.startswith("regional roadshow event (february)") or \
-               t_l.startswith("regional roadshow event (june)") or \
-               t_l.startswith("regional roadshow event (september/october)") or \
-               t_l.startswith("regional roadshow event")
+    # Remove rows created by RRE parsing where Product accidentally equals the location
+    out.loc[_is_rre_type(out['Type']) if isinstance(out['Type'], pd.Series) else False, :]  # no-op guard
+    mask_rre = out['Type'].apply(_is_rre_type).fillna(False)
+    out.loc[mask_rre & out['Product'].apply(_looks_like_location), 'Product'] = None
 
-    mask_rre = out['Type'].apply(_is_regional_roadshow).fillna(False)
-    if mask_rre.any():
-        # Move location-like Products into the Event Date field (if it's empty/NA),
-        # leaving Product free for the actual offering lines (Presenter, Stand Only, etc).
-        loc_mask = mask_rre & out['Product'].apply(_looks_like_location)
-        need_date = loc_mask & (out['Event Date (if applicable)'].isna() | (out['Event Date (if applicable)'].astype(str).str.strip() == ""))
-        out.loc[need_date, 'Event Date (if applicable)'] = out.loc[need_date, 'Product']
-        # When the row was purely a location line, clear Product so it won't try to cost-match.
-        out.loc[need_date, 'Product'] = None
-
-    # ---------- Apply Type->Product overrides BEFORE cost merge ----------
+    # Apply Type→Product overrides BEFORE cost merge
     out = _apply_type_overrides(out)
 
     # ---- Join Cost (+ F2F) by PRODUCT ONLY ----
@@ -251,7 +262,6 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     costs2 = costs_df.copy()
     costs2['Product_norm'] = costs2['Product'].apply(_norm)
 
-    # Deduplicate costs on Product to avoid exploding joins
     bring_cols = ['Product_norm','Cost']
     f2f_col_name = None
     for cand in ['F2F or Online?', 'F2F or Online', 'F2F/Online']:
@@ -262,7 +272,6 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     costs2 = costs2[bring_cols].drop_duplicates(subset=['Product_norm'], keep='first')
 
     out['Product_norm'] = out['Product'].apply(_norm)
-
     out = out.merge(costs2, on=['Product_norm'], how='left').drop(columns=['Product_norm'])
 
     # Final column order
@@ -270,7 +279,6 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     if f2f_col_name:
         out = out.rename(columns={f2f_col_name: 'F2F or Online?'})
         final_cols += ['F2F or Online?']
-
     out = out[final_cols].sort_values(['Random ID','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
 
     return out
@@ -339,13 +347,10 @@ def transform_confirmed(confirmed_df: pd.DataFrame) -> pd.DataFrame:
         'Cost': confirmed_df[c_cost],
         'F2F or Online?': confirmed_df[c_f2f] if c_f2f else "",
     })
-    # Apply overrides (kept here too in case someone pastes odd "Type" into confirmed sheet)
     out = _apply_type_overrides(out)
-    # Keep order
     final_cols = REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?']
     out = out[final_cols].sort_values(['Provider Name','Type','Event Date (if applicable)','Product'],
                                       na_position='last').reset_index(drop=True)
-    # Keep notes as attribute for template stage (aggregate later)
     if notes_col:
         out['_notes_long_'] = confirmed_df[notes_col]
     else:
@@ -410,10 +415,9 @@ def _first_value_cell_right(ws, r, c, try_two=True):
     return ws.cell(r, c + 1)
 
 # ===========================
-# Template population (shared) — NEW template layout
+# Template population (shared)
 # ===========================
 def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame | None) -> BytesIO:
-    # Build a product->F2F map if we have a cost sheet (Wishlist mode)
     f2f_map = {}
     if costs_df is not None and 'F2F or Online?' in costs_df.columns:
         def _n(s): return None if pd.isna(s) else str(s).strip()
@@ -431,7 +435,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             wb = load_workbook(BytesIO(template_bytes))
             ws = wb.active
 
-            # Fixed cells (new positions)
             prov = "" if pd.isna(provider) else str(provider)
             nm   = _sanitize_name(dfp['Name'].iloc[0] if 'Name' in dfp.columns and len(dfp) else "")
             ph   = "" if 'Phone' not in dfp.columns else ("" if pd.isna(dfp['Phone'].iloc[0]) else str(dfp['Phone'].iloc[0]))
@@ -444,7 +447,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             ws['D6'] = ph
             ws['E6'] = em
 
-            # Secondary contacts
             def _first(dfcol):
                 return (dfcol.iloc[0] if dfcol is not None and len(dfp) else "")
             if 'Events Name' in dfp.columns: ws['B10'] = _first(dfp['Events Name'])
@@ -456,7 +458,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             if 'Copy Name' in dfp.columns: ws['H10'] = _first(dfp['Copy Name'])
             if 'Copy Email' in dfp.columns: ws['H12'] = _first(dfp['Copy Email'])
 
-            # Find table header
             hdr_row, hdr_col, hmap = _find_table_header_row(ws)
             c_Type   = _get_col(hmap, "Type")
             c_Prod   = _get_col(hmap, "Product")
@@ -467,17 +468,14 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             c_Total  = _get_col(hmap, "Total")
             c_Notes  = _get_col(hmap, "Notes")
 
-            # Make header font bold (optional)
             for c in [c_Type,c_Prod,c_Det,c_Date,c_Charge,c_Qty,c_Total,c_Notes]:
                 if c: ws.cell(hdr_row, c).font = header_font
 
-            # Insert rows for n items
             start_row = hdr_row + 1
             n = len(dfp)
             if n > 1:
                 ws.insert_rows(start_row + 1, amount=n - 1)
 
-            # Fill rows
             for i, (_, r) in enumerate(dfp.iterrows()):
                 rr = start_row + i
                 typ   = r.get("Type", "")
@@ -485,7 +483,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 datev = r.get("Event Date (if applicable)", "")
                 charge = r.get("Cost", None)
                 qty = 1
-                # Details column: F2F/Online (from cleaned or fallback from cost map)
                 details = r.get("F2F or Online?", "")
                 if not details:
                     pk = None if pd.isna(prod) else str(prod).strip()
@@ -508,7 +505,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 if c_Notes:
                     ws.cell(rr, c_Notes, None)
 
-            # Borders across table (dotted)
             last_row = start_row + max(n - 1, 0)
             table_cols = [c for c in [c_Type,c_Prod,c_Det,c_Date,c_Charge,c_Qty,c_Total,c_Notes] if c]
             first_col, last_col = min(table_cols), max(table_cols)
@@ -517,13 +513,11 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 for c in range(first_col, last_col + 1):
                     ws.cell(r, c).border = dotted_b
 
-            # ---------- Summary block (labels to the left, values to the right) ----------
             ACC = ACC_FMT
             sum_col = c_Total if c_Total else c_Charge
             if sum_col:
                 sum_rng = f"{get_column_letter(sum_col)}{start_row}:{get_column_letter(sum_col)}{last_row}"
 
-                # Detect label column from "Total Package"
                 label_col = None
                 for c in range(1, ws.max_column + 1):
                     for rr in range(last_row + 1, min(ws.max_row, last_row + 200) + 1):
@@ -534,13 +528,12 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     if label_col:
                         break
                 if not label_col:
-                    label_col = 8  # fallback H if needed
+                    label_col = 8
 
                 value_col = label_col + 1
                 search_start = last_row + 1
                 search_end   = min(ws.max_row, last_row + 200)
 
-                # Total Package
                 r_tp, _ = _find_label_in_column(ws, "Total Package", label_col, search_start, search_end)
                 tp_coord = None
                 if r_tp:
@@ -549,7 +542,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     tp_cell.number_format = ACC
                     tp_coord = tp_cell.coordinate
 
-                # Discount
                 r_disc, _ = _find_label_in_column(ws, "Discount", label_col, search_start, search_end)
                 disc_coord = None
                 if r_disc:
@@ -559,7 +551,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     disc_cell.number_format = ACC
                     disc_coord = disc_cell.coordinate
 
-                # Total Package Price = TP - Discount
                 r_tpp, _ = _find_label_in_column(ws, "Total Package Price", label_col, search_start, search_end)
                 tpp_coord = None
                 if r_tpp and tp_coord and disc_coord:
@@ -568,7 +559,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     tpp_cell.number_format = ACC
                     tpp_coord = tpp_cell.coordinate
 
-                # VAT = TPP / 5
                 r_vat, _ = _find_label_in_column(ws, "VAT", label_col, search_start, search_end)
                 vat_coord = None
                 if r_vat and tpp_coord:
@@ -577,7 +567,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     vat_cell.number_format = ACC
                     vat_coord = vat_cell.coordinate
 
-                # OPP = TPP + VAT
                 r_opp, _ = _find_label_in_column(ws, "Overall Package Price", label_col, search_start, search_end)
                 if not r_opp and r_vat:
                     r_opp = r_vat + 2
@@ -586,7 +575,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     opp_cell.value = f"={tpp_coord}+{vat_coord}"
                     opp_cell.number_format = ACC
 
-            # ---------- Long "Notes" box ----------
+            # Notes box
             notes_text = ""
             if '_notes_long_' in dfp.columns:
                 notes_text = "\n\n".join(
@@ -603,7 +592,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             if notes_text:
                 found_r = None
                 for rr in range(last_row + 1, min(ws.max_row, last_row + 300) + 1):
-                    v = ws.cell(rr, 2).value  # column B = 2
+                    v = ws.cell(rr, 2).value  # column B
                     if isinstance(v, str) and _canon_label(v) == "notes":
                         found_r = rr
                         break
@@ -613,7 +602,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                         ws.cell(target_r, cc).value = notes_text
                         break
 
-            # Save provider file into zip
             out_bytes = BytesIO()
             wb.save(out_bytes)
             out_bytes.seek(0)
@@ -629,7 +617,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
 st.set_page_config(page_title="MOF Automation", layout="wide")
 st.title("MOF Automation")
 
-# Button styles (red submit, green download)
 st.markdown("""
 <style>
 div.stButton > button:first-child { background-color: #d90429 !important; color: white !important; }
@@ -669,15 +656,12 @@ if mode == "Wishlist":
                     st.exception(e)
                     st.stop()
 
-                # Build results.zip with templates + cleaned data
                 zip_buf = BytesIO()
                 with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-                    # cleaned_output.xlsx
                     cleaned_bytes = BytesIO()
                     cleaned.to_excel(cleaned_bytes, index=False)
                     zf.writestr("data/cleaned_output.xlsx", cleaned_bytes.getvalue())
 
-                    # templates/*
                     try:
                         template_bytes = template_file.read()
                         tpl_zip = _populate_template_bytes(template_bytes, cleaned, costs_df)
@@ -690,7 +674,6 @@ if mode == "Wishlist":
                 zip_buf.seek(0)
                 st.success(f"Done. Cleaned {len(cleaned)} rows.")
 
-                # Missing costs warning
                 missing_costs = cleaned['Cost'].isna().sum()
                 if missing_costs > 0:
                     st.warning(f"{missing_costs} row(s) have no Cost match by Product. Ensure Product exists in the MOF Cost Sheet.")
@@ -729,7 +712,6 @@ else:
                     st.exception(e)
                     st.stop()
 
-                # Build results.zip with templates only
                 zip_buf = BytesIO()
                 with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
                     try:
