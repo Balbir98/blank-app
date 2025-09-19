@@ -7,7 +7,7 @@ import streamlit as st
 
 # Excel handling / styling
 from openpyxl import load_workbook
-from openpyxl.styles import Border, Side, Font
+from openpyxl.styles import Border, Side, Font, Alignment
 from openpyxl.utils import get_column_letter
 
 # ===========================
@@ -100,9 +100,12 @@ REPEATED_FIRST = [
     'Invoice Name','Invoice Email',
 ]
 
+# Include your long Zoho label here
 NOTES_SOURCE_HEADERS = [
+    "Please provide any feedback on our Marketing & Opportunities 2026 Pack and webinar:",
     "Please provide any further notes you may have or want to have considered with this form:",
-    "Further notes", "Any further notes"
+    "Further notes",
+    "Any further notes",
 ]
 
 ID_COLS_WISHLIST = [
@@ -112,7 +115,7 @@ ID_COLS_WISHLIST = [
     'Copy Name','Copy Email',
     'When To Invoice',
     'Invoice Name','Invoice Email',
-] + NOTES_SOURCE_HEADERS
+]  # <-- do NOT add notes headers here any more (keeps them out of the cleaned export)
 
 def _is_event_label(x):
     if pd.isna(x):
@@ -125,11 +128,6 @@ def _is_event_label(x):
     return False
 
 # ===== Regional Roadshow helpers =====
-_RRE_OPTION_SET = {
-    "keynote presenter / panellist",
-    "roundtable presenter",
-    "stand only",
-}
 _LOCATION_SET = {
     "north","south","east","west","midlands","central","scotland","wales","wales/bristol","wales / bristol",
     "northern ireland","north east","north west","south east","south west","london",
@@ -161,6 +159,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
            - cell value (option picked) → Product
            - skip blanks/unchecked
       * Type→Product overrides applied BEFORE cost merge.
+      * Notes kept only for template population (not in cleaned export).
     """
     if form_df.shape[0] < 2:
         return pd.DataFrame(columns=REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?'])
@@ -171,6 +170,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     col_lc_map = {str(c).strip().lower(): c for c in form_df.columns}
     wanted_cols = [col_lc_map.get(c.lower()) for c in ID_COLS_WISHLIST if col_lc_map.get(c.lower())]
 
+    # find the notes column in the raw form (optional)
     notes_col = None
     for cand in NOTES_SOURCE_HEADERS:
         c = col_lc_map.get(cand.strip().lower())
@@ -239,19 +239,24 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     out = pd.DataFrame.from_records(records)
 
     # Attach repeated fields from data_rows
-    for c in REPEATED_FIRST + ([notes_col] if notes_col else []):
-        if c and c in data_rows.columns:
+    for c in REPEATED_FIRST:
+        if c in data_rows.columns:
             out[c] = out['_ridx'].map(data_rows[c])
         else:
-            if c in REPEATED_FIRST:
-                out[c] = None
+            out[c] = None
+
+    # Capture notes into a private column for template use only (not exported)
+    if notes_col and notes_col in data_rows.columns:
+        out['_notes_long_'] = out['_ridx'].map(data_rows[notes_col])
+    else:
+        out['_notes_long_'] = ""
 
     # Nothing parsed
     if out.empty:
         return pd.DataFrame(columns=REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?'])
 
-    # Keep only the key outputs before cost join
-    out = out[['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product']].copy()
+    # Keep only the key outputs before cost join (plus the private notes col)
+    out = out[['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','_notes_long_']].copy()
 
     # --- Clean up any accidental "location as product" on RRE rows ---
     mask_rre = out['Type'].apply(_is_rre_type).fillna(False)
@@ -280,12 +285,13 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     out['Product_norm'] = out['Product'].apply(_norm)
     out = out.merge(costs2, on=['Product_norm'], how='left').drop(columns=['Product_norm'])
 
-    # Final column order
-    final_cols = REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost']
+    # Final column order for internal processing (private notes retained for template)
+    final_cols_internal = REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost']
     if f2f_col_name:
         out = out.rename(columns={f2f_col_name: 'F2F or Online?'})
-        final_cols += ['F2F or Online?']
-    out = out[final_cols].sort_values(['Random ID','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
+        final_cols_internal += ['F2F or Online?']
+    final_cols_internal += ['_notes_long_']
+    out = out[final_cols_internal].sort_values(['Random ID','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
 
     return out
 
@@ -359,7 +365,7 @@ def transform_confirmed(confirmed_df: pd.DataFrame) -> pd.DataFrame:
     final_cols = REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?']
     out = out[final_cols].sort_values(['Provider Name','Type','Event Date (if applicable)','Product'],
                                       na_position='last').reset_index(drop=True)
-    # Keep notes for template stage
+    # Keep notes for template stage (store in private column)
     if notes_col:
         out['_notes_long_'] = confirmed_df[notes_col]
     else:
@@ -441,6 +447,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
     ACC_FMT = '_-£* #,##0.00_-;_-£* -#,##0.00_-;_-£* "-"??_-;_-@_-'
 
     with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # IMPORTANT: we'll export a version of "cleaned" WITHOUT the private notes column later.
         for provider, dfp in cleaned.groupby('Provider Name', dropna=False):
             wb = load_workbook(BytesIO(template_bytes))
             ws = wb.active
@@ -600,32 +607,15 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     opp_cell.value = f"={tpp_coord}+{vat_coord}"
                     opp_cell.number_format = ACC
 
-            # ---------- Long "Notes" box ----------
-            notes_text = ""
+            # ---------- Notes into B27 (wrapped) ----------
+            note_text = ""
             if '_notes_long_' in dfp.columns:
-                notes_text = "\n\n".join(
-                    [str(x).strip() for x in dfp['_notes_long_'].fillna("").unique() if str(x).strip()]
-                )
-            else:
-                for cand in NOTES_SOURCE_HEADERS:
-                    if cand in dfp.columns:
-                        notes_text = "\n\n".join(
-                            [str(x).strip() for x in dfp[cand].fillna("").unique() if str(x).strip()]
-                        )
-                        break
-
-            if notes_text:
-                found_r = None
-                for rr in range(last_row + 1, min(ws.max_row, last_row + 300) + 1):
-                    v = ws.cell(rr, 2).value  # column B = 2
-                    if isinstance(v, str) and _canon_label(v) == "notes":
-                        found_r = rr
-                        break
-                if found_r:
-                    target_r = found_r + 1
-                    for cc in [2, 3, 4]:
-                        ws.cell(target_r, cc).value = notes_text
-                        break
+                # aggregate unique non-empty
+                note_text = "\n\n".join([str(x).strip() for x in dfp['_notes_long_'].fillna("").unique() if str(x).strip()])
+            if note_text:
+                cell = ws['B27']
+                cell.value = note_text
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
 
             # Save provider file into zip
             out_bytes = BytesIO()
@@ -678,23 +668,24 @@ if mode == "Wishlist":
                 try:
                     form_df = _read_any_table(form_file, preferred_sheet_name="Form")
                     costs_df = _read_any_table(cost_file)
-                    cleaned = transform_wishlist(form_df, costs_df)
+                    cleaned_internal = transform_wishlist(form_df, costs_df)  # contains _notes_long_
                 except Exception as e:
                     st.exception(e)
                     st.stop()
 
-                # Build results.zip with templates + cleaned data
+                # Build results.zip with templates + cleaned data (without notes)
                 zip_buf = BytesIO()
                 with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-                    # cleaned_output.xlsx
+                    # cleaned_output.xlsx (drop the private notes column)
+                    cleaned_to_export = cleaned_internal.drop(columns=['_notes_long_'], errors='ignore')
                     cleaned_bytes = BytesIO()
-                    cleaned.to_excel(cleaned_bytes, index=False)
+                    cleaned_to_export.to_excel(cleaned_bytes, index=False)
                     zf.writestr("data/cleaned_output.xlsx", cleaned_bytes.getvalue())
 
                     # templates/*
                     try:
                         template_bytes = template_file.read()
-                        tpl_zip = _populate_template_bytes(template_bytes, cleaned, costs_df)
+                        tpl_zip = _populate_template_bytes(template_bytes, cleaned_internal, costs_df)
                         with zipfile.ZipFile(tpl_zip, 'r') as tplzf:
                             for info in tplzf.infolist():
                                 zf.writestr(info.filename, tplzf.read(info.filename))
@@ -702,15 +693,15 @@ if mode == "Wishlist":
                         st.exception(RuntimeError(f"Template population failed: {e}"))
 
                 zip_buf.seek(0)
-                st.success(f"Done. Cleaned {len(cleaned)} rows.")
+                st.success(f"Done. Cleaned {len(cleaned_to_export)} rows.")
 
                 # Missing costs warning
-                missing_costs = cleaned['Cost'].isna().sum()
+                missing_costs = cleaned_to_export['Cost'].isna().sum()
                 if missing_costs > 0:
                     st.warning(f"{missing_costs} row(s) have no Cost match by Product. Ensure Product exists in the MOF Cost Sheet.")
                     with st.expander("Preview rows missing Cost"):
                         st.dataframe(
-                            cleaned[cleaned['Cost'].isna()][
+                            cleaned_to_export[cleaned_to_export['Cost'].isna()][
                                 ['Provider Name','Type','Event Date (if applicable)','Product']
                             ].head(500)
                         )
@@ -738,7 +729,7 @@ else:
             with st.spinner("Processing confirmed items..."):
                 try:
                     confirmed_df = _read_any_table(confirmed_file)
-                    cleaned_confirmed = transform_confirmed(confirmed_df)
+                    cleaned_confirmed = transform_confirmed(confirmed_df)  # contains _notes_long_
                 except Exception as e:
                     st.exception(e)
                     st.stop()
