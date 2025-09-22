@@ -99,7 +99,7 @@ REPEATED_FIRST = [
     'Invoice Name','Invoice Email',
 ]
 
-# Recognised Zoho notes labels (we'll read them but never export them)
+# Recognised Zoho notes labels (we will read them but NEVER export as lines)
 NOTES_SOURCE_HEADERS = [
     "Please provide any feedback on our Marketing & Opportunities 2026 Pack and webinar:",
     "Please provide any further notes you may have or want to have considered with this form:",
@@ -153,7 +153,8 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     then join Cost (+F2F).
     - Product lookups to MOF Cost are by Product only.
     - Regional Roadshow: sub-header(region)→Event Date; cell(ticked option)→Product.
-    - Notes captured privately (_notes_long_), not exported.
+    - Notes captured privately (_notes_long_), not exported as rows.
+    - Lines where Type equals a notes label are removed.
     """
     if form_df.shape[0] < 2:
         return pd.DataFrame(columns=REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?'])
@@ -164,27 +165,31 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     col_lc_map = {str(c).strip().lower(): c for c in form_df.columns}
     wanted_cols = [col_lc_map.get(c.lower()) for c in ID_COLS_WISHLIST if col_lc_map.get(c.lower())]
 
-    # locate notes column in raw form (optional)
-    notes_col = None
-    for cand in NOTES_SOURCE_HEADERS:
-        c = col_lc_map.get(cand.strip().lower())
-        if c:
-            notes_col = c
-            break
+    # Detect ALL notes columns present (could be more than one)
+    notes_cols = [col_lc_map[h.lower()] for h in NOTES_SOURCE_HEADERS if h.lower() in col_lc_map]
+    notes_name_set = set(notes_cols)
+
+    def _is_notes_column(col_name) -> bool:
+        return col_name in notes_name_set
 
     records = []
     for ridx, row in data_rows.iterrows():
         current_type = None
         for j, col in enumerate(form_df.columns):
-            val = row[col]
+            # Never start a new "Type" block with a notes column
             if not str(col).startswith('Unnamed'):
-                if col not in wanted_cols and col not in ['Added Time','Referrer Name','Task Owner']:
+                if col not in wanted_cols and col not in ['Added Time','Referrer Name','Task Owner'] and not _is_notes_column(col):
                     current_type = col
+
+            val = row[col]
             if pd.isna(val):
                 continue
-
-            sub = subheaders.iloc[j] if j < len(subheaders) else None
             text_val = str(val).strip()
+            sub = subheaders.iloc[j] if j < len(subheaders) else None
+
+            # Skip any notes columns completely (we collect them separately)
+            if _is_notes_column(col):
+                continue
 
             # Regional matrix
             if current_type and _is_rre_type(current_type) and sub is not None and _looks_like_location(str(sub)):
@@ -237,15 +242,29 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
         else:
             out[c] = None
 
-    # Private notes column (not exported)
-    if notes_col and notes_col in data_rows.columns:
-        out['_notes_long_'] = out['_ridx'].map(data_rows[notes_col])
+    # Provider-level notes (aggregate all present notes columns)
+    if notes_cols:
+        def _agg_notes(ridx):
+            vals = []
+            for nc in notes_cols:
+                v = data_rows.loc[ridx, nc] if nc in data_rows.columns else None
+                v = "" if pd.isna(v) else str(v).strip()
+                if v:
+                    vals.append(v)
+            return "\n\n".join(vals)
+        out['_notes_long_'] = out['_ridx'].apply(_agg_notes)
     else:
         out['_notes_long_'] = ""
 
+    # Nothing parsed
     if out.empty:
         return pd.DataFrame(columns=REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?'])
 
+    # Remove any stray rows where Type equals a notes header (double safety)
+    notes_lc = {h.casefold().strip() for h in NOTES_SOURCE_HEADERS}
+    out = out[~out['Type'].astype(str).str.casefold().str.strip().isin(notes_lc)].copy()
+
+    # Keep key outputs before cost join (plus private notes)
     out = out[['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','_notes_long_']].copy()
 
     # Clean: prevent location as product for RRE rows
@@ -430,8 +449,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
 
     zip_buf = BytesIO()
     dotted = Side(style='dotted')
-    # WHITE header text (on orange background)
-    header_font = Font(name="Segoe UI", size=12, bold=True, color="FFFFFF")
+    header_font = Font(name="Segoe UI", size=12, bold=True, color="FFFFFF")  # white header text
     ACC_FMT = '_-£* #,##0.00_-;_-£* -#,##0.00_-;_-£* "-"??_-;_-@_-'
 
     with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -450,7 +468,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             ws['B6'] = nm
             ws['D4'] = wti
             ws['D6'] = ph
-            ws['F6'] = em   # << moved Email here (from E6)
+            ws['F6'] = em   # email here
 
             # Secondary contacts
             def _first(dfcol): 
@@ -588,14 +606,16 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     opp_cell.value = f"={tpp_coord}+{vat_coord}"
                     opp_cell.number_format = ACC
 
-            # ---------- Notes into B27 (wrapped) ----------
+            # ---------- Notes into Notes sheet (A2, wrapped) ----------
             note_text = ""
             if '_notes_long_' in dfp.columns:
+                # Aggregate unique non-empty across this provider
                 note_text = "\n\n".join([str(x).strip() for x in dfp['_notes_long_'].fillna("").unique() if str(x).strip()])
             if note_text:
-                cell = ws['B27']
-                cell.value = note_text
-                cell.alignment = Alignment(wrap_text=True, vertical="top")
+                target_ws = wb["Notes"] if "Notes" in wb.sheetnames else None
+                if target_ws is not None:
+                    target_ws["A2"].value = note_text
+                    target_ws["A2"].alignment = Alignment(wrap_text=True, vertical="top")
 
             # Save provider file into zip
             out_bytes = BytesIO()
@@ -657,7 +677,7 @@ if mode == "Wishlist":
                 zip_buf = BytesIO()
                 with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
                     cleaned_to_export = cleaned_internal.drop(columns=['_notes_long_'], errors='ignore')
-                    # hard-drop the Zoho notes headers if they somehow slipped through
+                    # hard-drop the Zoho notes headers if they somehow exist as columns
                     cleaned_to_export = cleaned_to_export.drop(columns=[h for h in NOTES_SOURCE_HEADERS if h in cleaned_to_export.columns], errors='ignore')
 
                     cleaned_bytes = BytesIO()
