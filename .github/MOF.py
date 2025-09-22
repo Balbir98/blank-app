@@ -149,8 +149,7 @@ def _is_unchecked(v) -> bool:
 
 def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Parse Zoho's wide export (row 0 = subheaders) → long rows,
-    then join Cost (+F2F).
+    Parse Zoho's wide export (row 0 = subheaders) → long rows, then join Cost (+F2F).
     - Product lookups to MOF Cost are by Product only.
     - Regional Roadshow: sub-header(region)→Event Date; cell(ticked option)→Product.
     - Notes captured privately (_notes_long_), not exported as rows.
@@ -168,7 +167,6 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     # Detect ALL notes columns present (could be more than one)
     notes_cols = [col_lc_map[h.lower()] for h in NOTES_SOURCE_HEADERS if h.lower() in col_lc_map]
     notes_name_set = set(notes_cols)
-
     def _is_notes_column(col_name) -> bool:
         return col_name in notes_name_set
 
@@ -187,7 +185,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
             text_val = str(val).strip()
             sub = subheaders.iloc[j] if j < len(subheaders) else None
 
-            # Skip any notes columns completely (we collect them separately)
+            # Skip notes columns entirely (they go to _notes_long_)
             if _is_notes_column(col):
                 continue
 
@@ -256,7 +254,6 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     else:
         out['_notes_long_'] = ""
 
-    # Nothing parsed
     if out.empty:
         return pd.DataFrame(columns=REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?'])
 
@@ -435,6 +432,13 @@ def _first_value_cell_right(ws, r, c, try_two=True):
         return ws.cell(r, cc)
     return ws.cell(r, c + 1)
 
+# Helper: get the Notes sheet case-insensitively
+def _get_notes_ws(wb):
+    for name in wb.sheetnames:
+        if str(name).strip().casefold() == "notes":
+            return wb[name]
+    return None
+
 # ===========================
 # Template population (shared)
 # ===========================
@@ -612,10 +616,10 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 # Aggregate unique non-empty across this provider
                 note_text = "\n\n".join([str(x).strip() for x in dfp['_notes_long_'].fillna("").unique() if str(x).strip()])
             if note_text:
-                target_ws = wb["Notes"] if "Notes" in wb.sheetnames else None
-                if target_ws is not None:
-                    target_ws["A2"].value = note_text
-                    target_ws["A2"].alignment = Alignment(wrap_text=True, vertical="top")
+                notes_ws = _get_notes_ws(wb)
+                if notes_ws is not None:
+                    notes_ws["A2"].value = note_text
+                    notes_ws["A2"].alignment = Alignment(wrap_text=True, vertical="top")
 
             # Save provider file into zip
             out_bytes = BytesIO()
@@ -677,7 +681,6 @@ if mode == "Wishlist":
                 zip_buf = BytesIO()
                 with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
                     cleaned_to_export = cleaned_internal.drop(columns=['_notes_long_'], errors='ignore')
-                    # hard-drop the Zoho notes headers if they somehow exist as columns
                     cleaned_to_export = cleaned_to_export.drop(columns=[h for h in NOTES_SOURCE_HEADERS if h in cleaned_to_export.columns], errors='ignore')
 
                     cleaned_bytes = BytesIO()
