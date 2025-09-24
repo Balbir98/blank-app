@@ -247,19 +247,6 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
             out[c] = None
 
     # Attach per-provider notes answers (hidden)
-    def _pick_first_nonempty(series):
-        # choose the first non-empty, preferring longer strings if multiple present
-        if series is None:
-            return ""
-        best = ""
-        for v in series.astype(str).tolist():
-            s = "" if v is None else str(v).strip()
-            if not s or s.lower() == "nan":
-                continue
-            if len(s) > len(best):
-                best = s
-        return best
-
     if q1_col:
         q1_by_ridx = data_rows[q1_col]
         out['_note_q1'] = out['_ridx'].map(q1_by_ridx).astype(str).apply(lambda s: "" if s.lower() == "nan" else s).fillna("")
@@ -311,7 +298,8 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     # Final internal columns (include hidden notes answers)
     final_cols_internal = REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost']
     if f2f_col_name:
-        out = out.rename(columns={f2f_col_name: 'F2F or Online?'})
+        out = out.rename(columns={f2f_col_name: 'F2F or Online?'}
+        )
         final_cols_internal += ['F2F or Online?']
     final_cols_internal += ['_note_q1','_note_q2']
     out = out[final_cols_internal].sort_values(['Random ID','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
@@ -623,7 +611,13 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     opp_cell.value = f"={tpp_coord}+{vat_coord}"
                     opp_cell.number_format = ACC
 
-            # ---------- Write Notes Q&A to Notes sheet ----------
+            # ---------- Write Notes Q&A to Notes sheet (UNWRAPPED) ----------
+            def _get_notes_ws(wb):
+                for name in wb.sheetnames:
+                    if str(name).strip().casefold() == "notes":
+                        return wb[name]
+                return wb.create_sheet("Notes")
+
             notes_ws = _get_notes_ws(wb)
 
             # Labels (questions)
@@ -631,8 +625,8 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             q2_label = MAIN_NOTES_QUESTIONS[1]
             notes_ws["A2"].value = q1_label
             notes_ws["A3"].value = q2_label
-            notes_ws["A2"].alignment = Alignment(wrap_text=True, vertical="top")
-            notes_ws["A3"].alignment = Alignment(wrap_text=True, vertical="top")
+            notes_ws["A2"].alignment = Alignment(wrap_text=False, vertical="top")
+            notes_ws["A3"].alignment = Alignment(wrap_text=False, vertical="top")
 
             # Answers (take first non-empty per provider group)
             def _first_nonempty(colname):
@@ -648,8 +642,8 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
 
             notes_ws["B2"].value = ans1 if ans1 else None
             notes_ws["B3"].value = ans2 if ans2 else None
-            notes_ws["B2"].alignment = Alignment(wrap_text=True, vertical="top")
-            notes_ws["B3"].alignment = Alignment(wrap_text=True, vertical="top")
+            notes_ws["B2"].alignment = Alignment(wrap_text=False, vertical="top")
+            notes_ws["B3"].alignment = Alignment(wrap_text=False, vertical="top")
 
             # Save provider file into zip
             out_bytes = BytesIO()
