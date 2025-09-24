@@ -440,11 +440,13 @@ def _first_value_cell_right(ws, r, c, try_two=True):
         return ws.cell(r, cc)
     return ws.cell(r, c + 1)
 
+# Notes sheet helper (robust: find or create)
 def _get_notes_ws(wb):
     for name in wb.sheetnames:
         if str(name).strip().casefold() == "notes":
             return wb[name]
-    return None
+    # create if missing so we always have a target
+    return wb.create_sheet("Notes")
 
 # ===========================
 # Template population (shared)
@@ -482,7 +484,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             ws['F6'] = em   # email here
 
             # Secondary contacts
-            def _first(dfcol): 
+            def _first(dfcol):
                 return (dfcol.iloc[0] if dfcol is not None and len(dfp) else "")
             if 'Events Name' in dfp.columns: ws['B10'] = _first(dfp['Events Name'])
             if 'Events Email' in dfp.columns: ws['B12'] = _first(dfp['Events Email'])
@@ -619,17 +621,26 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
 
             # ---------- Write provider notes to Notes sheet (A2) ----------
             notes_ws = _get_notes_ws(wb)
-            if notes_ws is not None:
-                # take the first non-empty provider-level notes string
-                prov_notes = ""
-                if '_notes_provider_' in dfp.columns:
-                    for s in dfp['_notes_provider_'].astype(str).tolist():
-                        if s and s.strip():
-                            prov_notes = s
-                            break
-                if prov_notes:
-                    notes_ws["A2"].value = prov_notes
-                    notes_ws["A2"].alignment = Alignment(wrap_text=True, vertical="top")
+
+            # Collect unique, non-empty notes strings for this provider
+            prov_notes_list = []
+            if '_notes_provider_' in dfp.columns:
+                for s in dfp['_notes_provider_'].astype(str).tolist():
+                    if not s:
+                        continue
+                    s_clean = s.strip()
+                    # ignore literal "nan" that can appear after astype(str)
+                    if not s_clean or s_clean.lower() == "nan":
+                        continue
+                    if s_clean not in prov_notes_list:
+                        prov_notes_list.append(s_clean)
+
+            prov_notes = "\n\n".join(prov_notes_list).strip()
+
+            # Write to A2; always set wrapping/top align
+            cell = notes_ws["A2"]
+            cell.value = prov_notes if prov_notes else None
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
 
             # Save provider file into zip
             out_bytes = BytesIO()
@@ -687,7 +698,7 @@ if mode == "Wishlist":
                     st.exception(e)
                     st.stop()
 
-                # Build results.zip (cleaned export drops hidden notes cols)
+                # Build results.zip (cleaned export drops hidden notes col)
                 zip_buf = BytesIO()
                 with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
                     cleaned_to_export = cleaned_internal.drop(columns=['_notes_provider_'], errors='ignore')
