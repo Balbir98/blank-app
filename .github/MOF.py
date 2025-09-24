@@ -99,10 +99,14 @@ REPEATED_FIRST = [
     'Invoice Name','Invoice Email',
 ]
 
-# Zoho notes labels to capture (but never export as line items)
-NOTES_SOURCE_HEADERS = [
+# The two main notes questions we want to show in the Notes tab
+MAIN_NOTES_QUESTIONS = [
     "Please provide any feedback on our Marketing & Opportunities 2026 Pack and webinar:",
     "Please provide any further notes you may have or want to have considered with this form:",
+]
+
+# Recognise these (plus a couple of short variants) but never output as line items
+NOTES_SOURCE_HEADERS = MAIN_NOTES_QUESTIONS + [
     "Further notes",
     "Any further notes",
 ]
@@ -151,8 +155,8 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     Parse Zoho wide export (row 0 = subheaders) → long rows, join Cost.
     - Product lookups to MOF Cost are by Product only.
     - Regional Roadshow: sub-header(region)→Event Date; cell(ticked option)→Product.
-    - Notes are captured to provider-level column `_notes_provider_` (for template Notes sheet).
-    - Notes never become line items and never appear in the export.
+    - Two notes answers captured per provider into hidden cols `_note_q1`, `_note_q2` for the Notes sheet.
+    - Notes never become line items and never appear in the clean export.
     """
     if form_df.shape[0] < 2:
         return pd.DataFrame(columns=REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?'])
@@ -163,40 +167,21 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     col_lc_map = {str(c).strip().lower(): c for c in form_df.columns}
     wanted_cols = [col_lc_map.get(c.lower()) for c in ID_COLS_WISHLIST if col_lc_map.get(c.lower())]
 
-    # Detect notes columns present
+    # Detect notes columns present (mapping for both main questions + any extras)
     notes_cols = [col_lc_map[h.lower()] for h in NOTES_SOURCE_HEADERS if h.lower() in col_lc_map]
     notes_name_set = set(notes_cols)
     def _is_notes_column(col_name) -> bool:
         return col_name in notes_name_set
 
-    # ---- Build provider → notes map directly from the Zoho source ----
-    provider_field = 'Provider Name' if 'Provider Name' in data_rows.columns else None
-    provider_notes_map = {}
-    if provider_field and notes_cols:
-        for _, r in data_rows.iterrows():
-            prov = r.get(provider_field)
-            if pd.isna(prov): 
-                continue
-            texts = []
-            for nc in notes_cols:
-                val = r.get(nc)
-                if pd.isna(val): 
-                    continue
-                s = str(val).strip()
-                if s:
-                    texts.append(s)
-            if texts:
-                combined = "\n\n".join(texts)
-                # keep first non-empty; or replace if longer text appears later
-                if prov not in provider_notes_map or len(combined) > len(provider_notes_map[prov]):
-                    provider_notes_map[prov] = combined
+    # Resolve the two *main* notes columns if present
+    q1_col = col_lc_map.get(MAIN_NOTES_QUESTIONS[0].lower())
+    q2_col = col_lc_map.get(MAIN_NOTES_QUESTIONS[1].lower())
 
     # ---- Parse into line items (excluding notes columns) ----
     records = []
     for ridx, row in data_rows.iterrows():
         current_type = None
         for j, col in enumerate(form_df.columns):
-            # Never start a new "Type" block with a notes column
             if not str(col).startswith('Unnamed'):
                 if col not in wanted_cols and col not in ['Added Time','Referrer Name','Task Owner'] and not _is_notes_column(col):
                     current_type = col
@@ -207,11 +192,10 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
             text_val = str(val).strip()
             sub = subheaders.iloc[j] if j < len(subheaders) else None
 
-            # Skip notes columns entirely
             if _is_notes_column(col):
-                continue
+                continue  # never create rows from notes
 
-            # Regional matrix
+            # Regional matrix handling
             if current_type and _is_rre_type(current_type) and sub is not None and _looks_like_location(str(sub)):
                 if _is_unchecked(text_val):
                     continue
@@ -262,11 +246,31 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
         else:
             out[c] = None
 
-    # Attach provider-level notes (hidden column used only for template)
-    if provider_field:
-        out['_notes_provider_'] = out[provider_field].map(provider_notes_map).fillna("")
+    # Attach per-provider notes answers (hidden)
+    def _pick_first_nonempty(series):
+        # choose the first non-empty, preferring longer strings if multiple present
+        if series is None:
+            return ""
+        best = ""
+        for v in series.astype(str).tolist():
+            s = "" if v is None else str(v).strip()
+            if not s or s.lower() == "nan":
+                continue
+            if len(s) > len(best):
+                best = s
+        return best
+
+    if q1_col:
+        q1_by_ridx = data_rows[q1_col]
+        out['_note_q1'] = out['_ridx'].map(q1_by_ridx).astype(str).apply(lambda s: "" if s.lower() == "nan" else s).fillna("")
     else:
-        out['_notes_provider_'] = ""
+        out['_note_q1'] = ""
+
+    if q2_col:
+        q2_by_ridx = data_rows[q2_col]
+        out['_note_q2'] = out['_ridx'].map(q2_by_ridx).astype(str).apply(lambda s: "" if s.lower() == "nan" else s).fillna("")
+    else:
+        out['_note_q2'] = ""
 
     if out.empty:
         return pd.DataFrame(columns=REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?'])
@@ -275,8 +279,8 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     notes_lc = {h.casefold().strip() for h in NOTES_SOURCE_HEADERS}
     out = out[~out['Type'].astype(str).str.casefold().str.strip().isin(notes_lc)].copy()
 
-    # Keep key outputs (plus hidden provider-notes)
-    out = out[['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','_notes_provider_']].copy()
+    # Keep key outputs (plus hidden notes)
+    out = out[['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','_note_q1','_note_q2']].copy()
 
     # Clean: prevent location as product for RRE rows
     mask_rre = out['Type'].apply(_is_rre_type).fillna(False)
@@ -304,12 +308,12 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     out['Product_norm'] = out['Product'].apply(_norm)
     out = out.merge(costs2, on=['Product_norm'], how='left').drop(columns=['Product_norm'])
 
-    # Final internal columns (include hidden notes)
+    # Final internal columns (include hidden notes answers)
     final_cols_internal = REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost']
     if f2f_col_name:
         out = out.rename(columns={f2f_col_name: 'F2F or Online?'})
         final_cols_internal += ['F2F or Online?']
-    final_cols_internal += ['_notes_provider_']
+    final_cols_internal += ['_note_q1','_note_q2']
     out = out[final_cols_internal].sort_values(['Random ID','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
 
     return out
@@ -376,9 +380,10 @@ def transform_confirmed(confirmed_df: pd.DataFrame) -> pd.DataFrame:
         'F2F or Online?': confirmed_df[c_f2f] if c_f2f else "",
     })
     out = _apply_type_overrides(out)
-    # keep same hidden col name for template step (empty for confirmed mode)
-    out['_notes_provider_'] = ""
-    final_cols = REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?','_notes_provider_']
+    # Keep hidden columns for template step (empty in confirmed mode)
+    out['_note_q1'] = ""
+    out['_note_q2'] = ""
+    final_cols = REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?','_note_q1','_note_q2']
     out = out[final_cols].sort_values(['Provider Name','Type','Event Date (if applicable)','Product'],
                                       na_position='last').reset_index(drop=True)
     return out
@@ -445,7 +450,6 @@ def _get_notes_ws(wb):
     for name in wb.sheetnames:
         if str(name).strip().casefold() == "notes":
             return wb[name]
-    # create if missing so we always have a target
     return wb.create_sheet("Notes")
 
 # ===========================
@@ -619,28 +623,33 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     opp_cell.value = f"={tpp_coord}+{vat_coord}"
                     opp_cell.number_format = ACC
 
-            # ---------- Write provider notes to Notes sheet (A2) ----------
+            # ---------- Write Notes Q&A to Notes sheet ----------
             notes_ws = _get_notes_ws(wb)
 
-            # Collect unique, non-empty notes strings for this provider
-            prov_notes_list = []
-            if '_notes_provider_' in dfp.columns:
-                for s in dfp['_notes_provider_'].astype(str).tolist():
-                    if not s:
-                        continue
-                    s_clean = s.strip()
-                    # ignore literal "nan" that can appear after astype(str)
-                    if not s_clean or s_clean.lower() == "nan":
-                        continue
-                    if s_clean not in prov_notes_list:
-                        prov_notes_list.append(s_clean)
+            # Labels (questions)
+            q1_label = MAIN_NOTES_QUESTIONS[0]
+            q2_label = MAIN_NOTES_QUESTIONS[1]
+            notes_ws["A2"].value = q1_label
+            notes_ws["A3"].value = q2_label
+            notes_ws["A2"].alignment = Alignment(wrap_text=True, vertical="top")
+            notes_ws["A3"].alignment = Alignment(wrap_text=True, vertical="top")
 
-            prov_notes = "\n\n".join(prov_notes_list).strip()
+            # Answers (take first non-empty per provider group)
+            def _first_nonempty(colname):
+                if colname not in dfp.columns:
+                    return ""
+                for s in dfp[colname].astype(str).tolist():
+                    if s and s.strip() and s.strip().lower() != "nan":
+                        return s.strip()
+                return ""
 
-            # Write to A2; always set wrapping/top align
-            cell = notes_ws["A2"]
-            cell.value = prov_notes if prov_notes else None
-            cell.alignment = Alignment(wrap_text=True, vertical="top")
+            ans1 = _first_nonempty("_note_q1")
+            ans2 = _first_nonempty("_note_q2")
+
+            notes_ws["B2"].value = ans1 if ans1 else None
+            notes_ws["B3"].value = ans2 if ans2 else None
+            notes_ws["B2"].alignment = Alignment(wrap_text=True, vertical="top")
+            notes_ws["B3"].alignment = Alignment(wrap_text=True, vertical="top")
 
             # Save provider file into zip
             out_bytes = BytesIO()
@@ -693,17 +702,20 @@ if mode == "Wishlist":
                 try:
                     form_df = _read_any_table(form_file, preferred_sheet_name="Form")
                     costs_df = _read_any_table(cost_file)
-                    cleaned_internal = transform_wishlist(form_df, costs_df)  # includes _notes_provider_
+                    cleaned_internal = transform_wishlist(form_df, costs_df)  # includes _note_q1/_note_q2
                 except Exception as e:
                     st.exception(e)
                     st.stop()
 
-                # Build results.zip (cleaned export drops hidden notes col)
+                # Build results.zip (cleaned export drops hidden notes cols)
                 zip_buf = BytesIO()
                 with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-                    cleaned_to_export = cleaned_internal.drop(columns=['_notes_provider_'], errors='ignore')
+                    cleaned_to_export = cleaned_internal.drop(columns=['_note_q1','_note_q2'], errors='ignore')
                     # safety: drop any of the Zoho notes headers if they somehow appear
-                    cleaned_to_export = cleaned_to_export.drop(columns=[h for h in NOTES_SOURCE_HEADERS if h in cleaned_to_export.columns], errors='ignore')
+                    cleaned_to_export = cleaned_to_export.drop(
+                        columns=[h for h in NOTES_SOURCE_HEADERS if h in cleaned_to_export.columns],
+                        errors='ignore'
+                    )
 
                     cleaned_bytes = BytesIO()
                     cleaned_to_export.to_excel(cleaned_bytes, index=False)
@@ -754,7 +766,7 @@ else:
             with st.spinner("Processing confirmed items..."):
                 try:
                     confirmed_df = _read_any_table(confirmed_file)
-                    cleaned_confirmed = transform_confirmed(confirmed_df)  # includes _notes_provider_ (empty)
+                    cleaned_confirmed = transform_confirmed(confirmed_df)  # includes empty _note_q1/_note_q2
                 except Exception as e:
                     st.exception(e)
                     st.stop()
