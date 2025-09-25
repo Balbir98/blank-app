@@ -50,10 +50,9 @@ TYPE_TO_PRODUCT = {
     "Training Video": "Online training video (provider produces and edits)",
     "Video adverts": "Video advert",
     "Product Focus emails": "Product Focus Emails",
-    # explicit 1:1 already requested
+    # explicit 1:1 requests
     "Compliance Webinar Sponsorship": "Compliance Webinar Sponsorship",
     "Full Adviser Site Takeover (Network and DA Club)": "Full Adviser Site Takeover (Network and DA Club)",
-    # NEW explicit 1:1
     "Full Adviser Site Login Takeover (Network and DA Club)": "Full Adviser Site Login Takeover (Network and DA Club)",
     "Network Adviser Site Login Takeover": "Network Adviser Site Login Takeover",
 }
@@ -121,27 +120,15 @@ REPEATED_FIRST = [
     'Invoice Name','Invoice Email',
 ]
 
-# The two main notes questions we want to show in the Notes tab
+# Two main notes questions (shown in Notes tab only)
 MAIN_NOTES_QUESTIONS = [
     "Please provide any feedback on our Marketing & Opportunities 2026 Pack and webinar:",
     "Please provide any further notes you may have or want to have considered with this form:",
 ]
+NOTES_SOURCE_HEADERS = MAIN_NOTES_QUESTIONS + ["Further notes", "Any further notes"]
 
-# Recognise these (plus a couple of short variants) but never output as line items
-NOTES_SOURCE_HEADERS = MAIN_NOTES_QUESTIONS + [
-    "Further notes",
-    "Any further notes",
-]
-
-# Only ID/admin fields here (NOT notes)
-ID_COLS_WISHLIST = [
-    'Random ID','Provider Name','Name','Phone','Email',
-    'Events Name','Events Email',
-    'Marketing Publications Name','Marketing Publications Email',
-    'Copy Name','Copy Email',
-    'When To Invoice',
-    'Invoice Name','Invoice Email',
-]
+# Admin/ID fields (NOT notes)
+ID_COLS_WISHLIST = REPEATED_FIRST.copy()
 
 def _is_event_label(x):
     if pd.isna(x): return False
@@ -164,8 +151,7 @@ def _looks_like_location(s: str) -> bool:
 
 def _is_rre_type(t: str) -> bool:
     if not isinstance(t, str): t = str(t or "")
-    t = t.casefold().strip()
-    return t.startswith("regional roadshow event")
+    return t.casefold().strip().startswith("regional roadshow event")
 
 def _is_email_marketing_type(t: str) -> bool:
     if not isinstance(t, str): t = str(t or "")
@@ -194,7 +180,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     col_lc_map = {str(c).strip().lower(): c for c in form_df.columns}
     wanted_cols = [col_lc_map.get(c.lower()) for c in ID_COLS_WISHLIST if col_lc_map.get(c.lower())]
 
-    # Detect notes columns present (mapping for both main questions + any extras)
+    # Detect notes columns present
     notes_cols = [col_lc_map[h.lower()] for h in NOTES_SOURCE_HEADERS if h.lower() in col_lc_map]
     notes_name_set = set(notes_cols)
     def _is_notes_column(col_name) -> bool:
@@ -219,11 +205,10 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
             text_val = str(val).strip()
             sub = subheaders.iloc[j] if j < len(subheaders) else None
 
-            # Skip notes
             if _is_notes_column(col):
                 continue
 
-            # ----- Special: Email Marketing (comma-separated selections per month) -----
+            # Email Marketing: month + comma-separated selections
             if current_type and _is_email_marketing_type(current_type) and sub is not None and _is_event_label(sub):
                 if _is_unchecked(text_val):
                     continue
@@ -236,9 +221,9 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
                             'Event Date (if applicable)': str(sub).strip(),
                             'Product': p
                         })
-                    continue  # handled
+                    continue
 
-            # ----- Regional Roadshow matrix -----
+            # Regional roadshow matrix
             if current_type and _is_rre_type(current_type) and sub is not None and _looks_like_location(str(sub)):
                 if _is_unchecked(text_val):
                     continue
@@ -250,7 +235,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
                 })
                 continue
 
-            # ----- Default behaviour -----
+            # Default behaviour
             if not str(col).startswith('Unnamed'):
                 if col in wanted_cols or col in ['Added Time','Referrer Name','Task Owner']:
                     continue
@@ -304,14 +289,14 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     if out.empty:
         return pd.DataFrame(columns=REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?'])
 
-    # Remove any stray rows where Type equals a notes header (extra safety)
+    # Remove any stray rows where Type equals a notes header (safety)
     notes_lc = {h.casefold().strip() for h in NOTES_SOURCE_HEADERS}
     out = out[~out['Type'].astype(str).str.casefold().str.strip().isin(notes_lc)].copy()
 
     # Keep key outputs (plus hidden notes)
     out = out[['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','_note_q1','_note_q2']].copy()
 
-    # Fix Email Marketing / RRE edge where product is a location (safety)
+    # Safety: if a regional row accidentally has the location in Product, blank it
     mask_rre = out['Type'].apply(_is_rre_type).fillna(False)
     out.loc[mask_rre & out['Product'].apply(_looks_like_location), 'Product'] = None
 
@@ -346,75 +331,6 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     final_cols_internal += ['_note_q1','_note_q2']
     out = out[final_cols_internal].sort_values(['Random ID','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
 
-    return out
-
-# ===========================
-# Confirmed Items Transform
-# ===========================
-def transform_confirmed(confirmed_df: pd.DataFrame) -> pd.DataFrame:
-    cols = list(confirmed_df.columns)
-
-    # Repeated fields
-    c_rand   = _pick(cols, "Random ID","RandomID","ID")
-    c_prov   = _pick(cols, "Provider Name","Provider")
-    c_name   = _pick(cols, "Name","Main Contact","Contact Name for Content")
-    c_phone  = _pick(cols, "Phone","Contact Phone Number")
-    c_email  = _pick(cols, "Email","Contact Email")
-
-    c_ev_n   = _pick(cols, "Events Name")
-    c_ev_e   = _pick(cols, "Events Email")
-    c_mp_n   = _pick(cols, "Marketing Publications Name")
-    c_mp_e   = _pick(cols, "Marketing Publications Email")
-    c_cp_n   = _pick(cols, "Copy Name")
-    c_cp_e   = _pick(cols, "Copy Email")
-    c_wti    = _pick(cols, "When To Invoice","When to Invoice")
-    c_inv_n  = _pick(cols, "Invoice Name")
-    c_inv_e  = _pick(cols, "Invoice Email")
-
-    # Line fields
-    c_type   = _pick(cols, "Type Of Event","Type of Event","Type")
-    c_prod   = _pick(cols, "Product Ordered","Product")
-    c_month  = _pick(cols, "Event Date (If Applicable)","Event Date (if applicable)","Month","Date")
-    c_cost   = _pick(cols, "Product Cost","Cost","Charge")
-    c_f2f    = _pick(cols, "F2F or Online?","F2F or Online","F2F/Online")
-
-    required = [
-        ("Provider Name", c_prov),
-        ("Type", c_type),
-        ("Product", c_prod),
-        ("Cost", c_cost),
-    ]
-    miss = [lab for lab, col in required if col is None]
-    if miss:
-        raise ValueError(f"Confirmed list missing required columns: {', '.join(miss)}")
-
-    out = pd.DataFrame({
-        'Random ID': confirmed_df[c_rand] if c_rand else "",
-        'Provider Name': confirmed_df[c_prov],
-        'Name': confirmed_df[c_name] if c_name else "",
-        'Phone': confirmed_df[c_phone] if c_phone else "",
-        'Email': confirmed_df[c_email] if c_email else "",
-        'Events Name': confirmed_df[c_ev_n] if c_ev_n else "",
-        'Events Email': confirmed_df[c_ev_e] if c_ev_e else "",
-        'Marketing Publications Name': confirmed_df[c_mp_n] if c_mp_n else "",
-        'Marketing Publications Email': confirmed_df[c_mp_e] if c_mp_e else "",
-        'Copy Name': confirmed_df[c_cp_n] if c_cp_n else "",
-        'Copy Email': confirmed_df[c_cp_e] if c_cp_e else "",
-        'When To Invoice': confirmed_df[c_wti] if c_wti else "",
-        'Invoice Name': confirmed_df[c_inv_n] if c_inv_n else "",
-        'Invoice Email': confirmed_df[c_inv_e] if c_inv_e else "",
-        'Type': confirmed_df[c_type],
-        'Event Date (if applicable)': confirmed_df[c_month] if c_month else "",
-        'Product': confirmed_df[c_prod].apply(_apply_product_aliases),
-        'Cost': confirmed_df[c_cost],
-        'F2F or Online?': confirmed_df[c_f2f] if c_f2f else "",
-    })
-    out = _apply_type_overrides(out)
-    out['_note_q1'] = ""
-    out['_note_q2'] = ""
-    final_cols = REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?','_note_q1','_note_q2']
-    out = out[final_cols].sort_values(['Provider Name','Type','Event Date (if applicable)','Product'],
-                                      na_position='last').reset_index(drop=True)
     return out
 
 # ===========================
@@ -474,7 +390,7 @@ def _first_value_cell_right(ws, r, c, try_two=True):
         return ws.cell(r, cc)
     return ws.cell(r, c + 1)
 
-# Notes sheet helper (robust: find or create)
+# Notes sheet helper (find or create)
 def _get_notes_ws(wb):
     for name in wb.sheetnames:
         if str(name).strip().casefold() == "notes":
@@ -482,10 +398,10 @@ def _get_notes_ws(wb):
     return wb.create_sheet("Notes")
 
 # ===========================
-# Template population (shared)
+# Template population
 # ===========================
 def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame | None) -> BytesIO:
-    # Build a product->F2F map if we have a cost sheet (Wishlist mode)
+    # Build a product->F2F map if we have a cost sheet
     f2f_map = {}
     if costs_df is not None and 'F2F or Online?' in costs_df.columns:
         def _n(s): return None if pd.isna(s) else str(s).strip()
@@ -514,7 +430,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             ws['B6'] = nm
             ws['D4'] = wti
             ws['D6'] = ph
-            ws['F6'] = em   # email here
+            ws['F6'] = em   # email goes here
 
             # Secondary contacts
             def _first(dfcol):
@@ -653,9 +569,8 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     opp_cell.value = f"={tpp_coord}+{vat_coord}"
                     opp_cell.number_format = ACC
 
-            # ---------- Write Notes Q&A to Notes sheet (UNWRAPPED) ----------
+            # ---------- Notes sheet (Q&A, UNWRAPPED) ----------
             notes_ws = _get_notes_ws(wb)
-
             q1_label = MAIN_NOTES_QUESTIONS[0]
             q2_label = MAIN_NOTES_QUESTIONS[1]
             notes_ws["A2"].value = q1_label
@@ -690,7 +605,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
     return zip_buf
 
 # ===========================
-# Streamlit App
+# Streamlit App (Wishlist only)
 # ===========================
 st.set_page_config(page_title="MOF Automation", layout="wide")
 st.title("MOF Automation")
@@ -707,115 +622,69 @@ st.markdown("""
 Upload your files and click **Submit** to get a ZIP containing:
 
 **MOF Templates** → one populated workbook per Provider Name  
-**Cleaned Data** → your single cleaned dataset (Wishlist mode)
+**Cleaned Data** → your single cleaned dataset
 """)
 
-mode = st.selectbox("Choose mode", ["Wishlist", "Confirmed Items"])
+c1, c2, c3 = st.columns(3)
+with c1:
+    form_file = st.file_uploader("Zoho Forms export (.csv/.xlsx/.xls)", type=["csv","xlsx","xls","txt"], key="form_wishlist")
+with c2:
+    cost_file = st.file_uploader("MOF Cost Sheet (.csv/.xlsx/.xls)", type=["csv","xlsx","xls","txt"], key="cost_wishlist")
+with c3:
+    template_file = st.file_uploader("New Template (Excel)", type=["xlsx","xls"], key="tpl_wishlist")
 
-# ---------------- Wishlist UI ----------------
-if mode == "Wishlist":
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        form_file = st.file_uploader("Zoho Forms export (.csv/.xlsx/.xls)", type=["csv","xlsx","xls","txt"], key="form_wishlist")
-    with c2:
-        cost_file = st.file_uploader("MOF Cost Sheet (.csv/.xlsx/.xls)", type=["csv","xlsx","xls","txt"], key="cost_wishlist")
-    with c3:
-        template_file = st.file_uploader("New Template (Excel)", type=["xlsx","xls"], key="tpl_wishlist")
+if st.button("Submit", key="submit_wishlist"):
+    if not form_file or not cost_file or not template_file:
+        st.error("Please upload the Zoho Forms export, MOF Cost Sheet, and the new Template.")
+    else:
+        with st.spinner("Processing..."):
+            try:
+                form_df = _read_any_table(form_file, preferred_sheet_name="Form")
+                costs_df = _read_any_table(cost_file)
+                cleaned_internal = transform_wishlist(form_df, costs_df)  # includes _note_q1/_note_q2
+            except Exception as e:
+                st.exception(e)
+                st.stop()
 
-    if st.button("Submit", key="submit_wishlist"):
-        if not form_file or not cost_file or not template_file:
-            st.error("Please upload the Zoho Forms export, MOF Cost Sheet, and the new Template.")
-        else:
-            with st.spinner("Processing wishlist..."):
+            # Build results.zip (cleaned export drops hidden notes cols)
+            zip_buf = BytesIO()
+            with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                cleaned_to_export = cleaned_internal.drop(columns=['_note_q1','_note_q2'], errors='ignore')
+                cleaned_to_export = cleaned_to_export.drop(
+                    columns=[h for h in NOTES_SOURCE_HEADERS if h in cleaned_to_export.columns],
+                    errors='ignore'
+                )
+
+                cleaned_bytes = BytesIO()
+                cleaned_to_export.to_excel(cleaned_bytes, index=False)
+                zf.writestr("data/cleaned_output.xlsx", cleaned_bytes.getvalue())
+
                 try:
-                    form_df = _read_any_table(form_file, preferred_sheet_name="Form")
-                    costs_df = _read_any_table(cost_file)
-                    cleaned_internal = transform_wishlist(form_df, costs_df)  # includes _note_q1/_note_q2
+                    template_bytes = template_file.read()
+                    tpl_zip = _populate_template_bytes(template_bytes, cleaned_internal, costs_df)
+                    with zipfile.ZipFile(tpl_zip, 'r') as tplzf:
+                        for info in tplzf.infolist():
+                            zf.writestr(info.filename, tplzf.read(info.filename))
                 except Exception as e:
-                    st.exception(e)
-                    st.stop()
+                    st.exception(RuntimeError(f"Template population failed: {e}"))
 
-                # Build results.zip (cleaned export drops hidden notes cols)
-                zip_buf = BytesIO()
-                with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-                    cleaned_to_export = cleaned_internal.drop(columns=['_note_q1','_note_q2'], errors='ignore')
-                    cleaned_to_export = cleaned_to_export.drop(
-                        columns=[h for h in NOTES_SOURCE_HEADERS if h in cleaned_to_export.columns],
-                        errors='ignore'
+            zip_buf.seek(0)
+            st.success(f"Done. Cleaned {len(cleaned_to_export)} rows.")
+
+            missing_costs = cleaned_to_export['Cost'].isna().sum()
+            if missing_costs > 0:
+                st.warning(f"{missing_costs} row(s) have no Cost match by Product. Ensure Product exists in the MOF Cost Sheet.")
+                with st.expander("Preview rows missing Cost"):
+                    st.dataframe(
+                        cleaned_to_export[cleaned_to_export['Cost'].isna()][
+                            ['Provider Name','Type','Event Date (if applicable)','Product']
+                        ].head(500)
                     )
 
-                    cleaned_bytes = BytesIO()
-                    cleaned_to_export.to_excel(cleaned_bytes, index=False)
-                    zf.writestr("data/cleaned_output.xlsx", cleaned_bytes.getvalue())
-
-                    try:
-                        template_bytes = template_file.read()
-                        tpl_zip = _populate_template_bytes(template_bytes, cleaned_internal, costs_df)
-                        with zipfile.ZipFile(tpl_zip, 'r') as tplzf:
-                            for info in tplzf.infolist():
-                                zf.writestr(info.filename, tplzf.read(info.filename))
-                    except Exception as e:
-                        st.exception(RuntimeError(f"Template population failed: {e}"))
-
-                zip_buf.seek(0)
-                st.success(f"Done. Cleaned {len(cleaned_to_export)} rows.")
-
-                missing_costs = cleaned_to_export['Cost'].isna().sum()
-                if missing_costs > 0:
-                    st.warning(f"{missing_costs} row(s) have no Cost match by Product. Ensure Product exists in the MOF Cost Sheet.")
-                    with st.expander("Preview rows missing Cost"):
-                        st.dataframe(
-                            cleaned_to_export[cleaned_to_export['Cost'].isna()][
-                                ['Provider Name','Type','Event Date (if applicable)','Product']
-                            ].head(500)
-                        )
-
-                st.download_button(
-                    "Download Now!",
-                    data=zip_buf.getvalue(),
-                    file_name="results.zip",
-                    mime="application/zip",
-                    key="dl_wishlist"
-                )
-
-# ---------------- Confirmed Items UI ----------------
-else:
-    c1, c2 = st.columns(2)
-    with c1:
-        confirmed_file = st.file_uploader("Confirmed Items export (.csv/.xlsx/.xls)", type=["csv","xlsx","xls","txt"], key="confirmed_list")
-    with c2:
-        template_file_c = st.file_uploader("New Template (Excel)", type=["xlsx","xls"], key="tpl_confirmed")
-
-    if st.button("Submit", key="submit_confirmed"):
-        if not confirmed_file or not template_file_c:
-            st.error("Please upload the Confirmed Items export and the new Template.")
-        else:
-            with st.spinner("Processing confirmed items..."):
-                try:
-                    confirmed_df = _read_any_table(confirmed_file)
-                    cleaned_confirmed = transform_confirmed(confirmed_df)  # includes empty _note_q1/_note_q2
-                except Exception as e:
-                    st.exception(e)
-                    st.stop()
-
-                zip_buf = BytesIO()
-                with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-                    try:
-                        template_bytes = template_file_c.read()
-                        tpl_zip = _populate_template_bytes(template_bytes, cleaned_confirmed, costs_df=None)
-                        with zipfile.ZipFile(tpl_zip, 'r') as tplzf:
-                            for info in tplzf.infolist():
-                                zf.writestr(info.filename, tplzf.read(info.filename))
-                    except Exception as e:
-                        st.exception(RuntimeError(f"Template population failed: {e}"))
-
-                zip_buf.seek(0)
-                st.success(f"Done. Generated {cleaned_confirmed['Provider Name'].nunique()} provider template(s).")
-
-                st.download_button(
-                    "Download Now!",
-                    data=zip_buf.getvalue(),
-                    file_name="confirmed_results.zip",
-                    mime="application/zip",
-                    key="dl_confirmed"
-                )
+            st.download_button(
+                "Download Now!",
+                data=zip_buf.getvalue(),
+                file_name="results.zip",
+                mime="application/zip",
+                key="dl_wishlist"
+            )
