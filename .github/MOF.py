@@ -49,7 +49,7 @@ TYPE_TO_PRODUCT = {
     "Social Media Post Share": "Social Media Post",
     "Training Video": "Online training video (provider produces and edits)",
     "Video adverts": "Video advert",
-    "Product Focus emails": "Product Focus emails",
+    "Product Focus emails": "Product Focus Emails",
     # explicit 1:1
     "Compliance Webinar Sponsorship": "Compliance Webinar Sponsorship",
     "Full Adviser Site Takeover (Network and DA Club)": "Full Adviser Site Takeover (Network and DA Club)",
@@ -65,6 +65,25 @@ def _apply_type_overrides(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df['Product'] = df.apply(_override, axis=1)
     return df
+
+# ===========================
+# Product aliasing (canonical names for MOF match)
+# ===========================
+PRODUCT_ALIASES = {
+    # case-insensitive keys (lowercased) -> canonical value
+    "product focus emails": "Product Focus Emails",
+    "product focus email": "Product Focus Emails",
+    "promotional emails": "Promotional Emails",
+    "promotional email": "Promotional Emails",
+    "social media post share": "Social Media Post Share",
+    "social media post": "Social Media Post Share",
+    "compliance update sponsorship email": "Compliance Update Sponsorship Email",
+    "compliance update sponsorship": "Compliance Update Sponsorship Email",
+}
+def _apply_product_aliases(s):
+    if pd.isna(s): return s
+    v = str(s).strip()
+    return PRODUCT_ALIASES.get(v.casefold(), v)
 
 # ===========================
 # Helper: loose column picker
@@ -145,6 +164,10 @@ def _is_rre_type(t: str) -> bool:
     t = t.casefold().strip()
     return t.startswith("regional roadshow event")
 
+def _is_email_marketing_type(t: str) -> bool:
+    if not isinstance(t, str): t = str(t or "")
+    return "email marketing" in t.casefold()
+
 def _is_unchecked(v) -> bool:
     if pd.isna(v): return True
     s = str(v).strip().casefold()
@@ -153,9 +176,10 @@ def _is_unchecked(v) -> bool:
 def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     """
     Parse Zoho wide export (row 0 = subheaders) → long rows, join Cost.
-    - Product lookups to MOF Cost are by Product only.
+    - Product lookups to MOF Cost are by Product only (with product aliasing).
     - Regional Roadshow: sub-header(region)→Event Date; cell(ticked option)→Product.
-    - Two notes answers captured per provider into hidden cols `_note_q1`, `_note_q2` for the Notes sheet.
+    - Email Marketing: month subheader + comma-separated selections → 1 row per selection.
+    - Notes Q&A captured per provider into hidden cols `_note_q1`, `_note_q2` for the Notes sheet.
     - Notes never become line items and never appear in the clean export.
     """
     if form_df.shape[0] < 2:
@@ -192,10 +216,28 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
             text_val = str(val).strip()
             sub = subheaders.iloc[j] if j < len(subheaders) else None
 
+            # Skip notes
             if _is_notes_column(col):
-                continue  # never create rows from notes
+                continue
 
-            # Regional matrix handling
+            # ----- Special: Email Marketing (comma-separated selections per month) -----
+            if current_type and _is_email_marketing_type(current_type) and sub is not None and _is_event_label(sub):
+                if _is_unchecked(text_val):
+                    continue
+                # split by comma -> one row per selection
+                parts = [p.strip() for p in re.split(r'\s*,\s*', text_val) if p.strip()]
+                if parts:
+                    for p in parts:
+                        records.append({
+                            '_ridx': ridx,
+                            'Type': current_type,
+                            'Event Date (if applicable)': str(sub).strip(),
+                            'Product': p
+                        })
+                    continue  # handled
+                # fall through if no parts
+
+            # ----- Regional Roadshow matrix -----
             if current_type and _is_rre_type(current_type) and sub is not None and _looks_like_location(str(sub)):
                 if _is_unchecked(text_val):
                     continue
@@ -207,7 +249,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
                 })
                 continue
 
-            # Default behaviour
+            # ----- Default behaviour -----
             if not str(col).startswith('Unnamed'):
                 if col in wanted_cols or col in ['Added Time','Referrer Name','Task Owner']:
                     continue
@@ -252,7 +294,6 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
         out['_note_q1'] = out['_ridx'].map(q1_by_ridx).astype(str).apply(lambda s: "" if s.lower() == "nan" else s).fillna("")
     else:
         out['_note_q1'] = ""
-
     if q2_col:
         q2_by_ridx = data_rows[q2_col]
         out['_note_q2'] = out['_ridx'].map(q2_by_ridx).astype(str).apply(lambda s: "" if s.lower() == "nan" else s).fillna("")
@@ -269,11 +310,12 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     # Keep key outputs (plus hidden notes)
     out = out[['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','_note_q1','_note_q2']].copy()
 
-    # Clean: prevent location as product for RRE rows
+    # Fix Email Marketing / RRE edge where product is a location (safety)
     mask_rre = out['Type'].apply(_is_rre_type).fillna(False)
     out.loc[mask_rre & out['Product'].apply(_looks_like_location), 'Product'] = None
 
-    # Apply overrides before costs
+    # Apply product aliasing then type overrides
+    out['Product'] = out['Product'].apply(_apply_product_aliases)
     out = _apply_type_overrides(out)
 
     # Costs join by Product only
@@ -282,7 +324,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
         raise ValueError("Cost sheet must contain columns: Product, Cost")
 
     costs2 = costs_df.copy()
-    costs2['Product_norm'] = costs2['Product'].apply(_norm)
+    costs2['Product_norm'] = costs2['Product'].apply(_norm).apply(_apply_product_aliases)
     bring_cols = ['Product_norm','Cost']
     f2f_col_name = None
     for cand in ['F2F or Online?', 'F2F or Online', 'F2F/Online']:
@@ -292,14 +334,13 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
             break
     costs2 = costs2[bring_cols].drop_duplicates(subset=['Product_norm'], keep='first')
 
-    out['Product_norm'] = out['Product'].apply(_norm)
+    out['Product_norm'] = out['Product'].apply(_norm).apply(_apply_product_aliases)
     out = out.merge(costs2, on=['Product_norm'], how='left').drop(columns=['Product_norm'])
 
     # Final internal columns (include hidden notes answers)
     final_cols_internal = REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost']
     if f2f_col_name:
-        out = out.rename(columns={f2f_col_name: 'F2F or Online?'}
-        )
+        out = out.rename(columns={f2f_col_name: 'F2F or Online?'})
         final_cols_internal += ['F2F or Online?']
     final_cols_internal += ['_note_q1','_note_q2']
     out = out[final_cols_internal].sort_values(['Random ID','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
@@ -363,12 +404,11 @@ def transform_confirmed(confirmed_df: pd.DataFrame) -> pd.DataFrame:
         'Invoice Email': confirmed_df[c_inv_e] if c_inv_e else "",
         'Type': confirmed_df[c_type],
         'Event Date (if applicable)': confirmed_df[c_month] if c_month else "",
-        'Product': confirmed_df[c_prod],
+        'Product': confirmed_df[c_prod].apply(_apply_product_aliases),
         'Cost': confirmed_df[c_cost],
         'F2F or Online?': confirmed_df[c_f2f] if c_f2f else "",
     })
     out = _apply_type_overrides(out)
-    # Keep hidden columns for template step (empty in confirmed mode)
     out['_note_q1'] = ""
     out['_note_q2'] = ""
     final_cols = REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?','_note_q1','_note_q2']
@@ -449,7 +489,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
     if costs_df is not None and 'F2F or Online?' in costs_df.columns:
         def _n(s): return None if pd.isna(s) else str(s).strip()
         tmp = costs_df[['Product','F2F or Online?']].copy()
-        tmp['Product_norm'] = tmp['Product'].apply(_n)
+        tmp['Product_norm'] = tmp['Product'].apply(_n).apply(_apply_product_aliases)
         f2f_map = dict(zip(tmp['Product_norm'], tmp['F2F or Online?']))
 
     zip_buf = BytesIO()
@@ -519,6 +559,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 details = r.get("F2F or Online?", "")
                 if not details:
                     pk = None if pd.isna(prod) else str(prod).strip()
+                    pk = _apply_product_aliases(pk)
                     if pk in f2f_map:
                         details = f2f_map.get(pk, "")
 
@@ -612,15 +653,8 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                     opp_cell.number_format = ACC
 
             # ---------- Write Notes Q&A to Notes sheet (UNWRAPPED) ----------
-            def _get_notes_ws(wb):
-                for name in wb.sheetnames:
-                    if str(name).strip().casefold() == "notes":
-                        return wb[name]
-                return wb.create_sheet("Notes")
-
             notes_ws = _get_notes_ws(wb)
 
-            # Labels (questions)
             q1_label = MAIN_NOTES_QUESTIONS[0]
             q2_label = MAIN_NOTES_QUESTIONS[1]
             notes_ws["A2"].value = q1_label
@@ -628,7 +662,6 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             notes_ws["A2"].alignment = Alignment(wrap_text=False, vertical="top")
             notes_ws["A3"].alignment = Alignment(wrap_text=False, vertical="top")
 
-            # Answers (take first non-empty per provider group)
             def _first_nonempty(colname):
                 if colname not in dfp.columns:
                     return ""
