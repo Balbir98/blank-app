@@ -50,9 +50,12 @@ TYPE_TO_PRODUCT = {
     "Training Video": "Online training video (provider produces and edits)",
     "Video adverts": "Video advert",
     "Product Focus emails": "Product Focus Emails",
-    # explicit 1:1
+    # explicit 1:1 already requested
     "Compliance Webinar Sponsorship": "Compliance Webinar Sponsorship",
     "Full Adviser Site Takeover (Network and DA Club)": "Full Adviser Site Takeover (Network and DA Club)",
+    # NEW explicit 1:1
+    "Full Adviser Site Login Takeover (Network and DA Club)": "Full Adviser Site Login Takeover (Network and DA Club)",
+    "Network Adviser Site Login Takeover": "Network Adviser Site Login Takeover",
 }
 _TYPE_OVERRIDE_LC = {k.casefold().strip(): v for k, v in TYPE_TO_PRODUCT.items()}
 
@@ -224,7 +227,6 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
             if current_type and _is_email_marketing_type(current_type) and sub is not None and _is_event_label(sub):
                 if _is_unchecked(text_val):
                     continue
-                # split by comma -> one row per selection
                 parts = [p.strip() for p in re.split(r'\s*,\s*', text_val) if p.strip()]
                 if parts:
                     for p in parts:
@@ -235,7 +237,6 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
                             'Product': p
                         })
                     continue  # handled
-                # fall through if no parts
 
             # ----- Regional Roadshow matrix -----
             if current_type and _is_rre_type(current_type) and sub is not None and _looks_like_location(str(sub)):
@@ -738,7 +739,6 @@ if mode == "Wishlist":
                 zip_buf = BytesIO()
                 with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
                     cleaned_to_export = cleaned_internal.drop(columns=['_note_q1','_note_q2'], errors='ignore')
-                    # safety: drop any of the Zoho notes headers if they somehow appear
                     cleaned_to_export = cleaned_to_export.drop(
                         columns=[h for h in NOTES_SOURCE_HEADERS if h in cleaned_to_export.columns],
                         errors='ignore'
