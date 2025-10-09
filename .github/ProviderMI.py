@@ -67,7 +67,7 @@ def read_table(upload) -> pd.DataFrame:
     return df
 
 # --------------------------
-# Firm Level (UNCHANGED LOGIC; now formatted as %)
+# Firm Level (unchanged logic)
 # --------------------------
 def firm_level_table(df: pd.DataFrame) -> pd.DataFrame:
     d = df[(df["Firm Name"] != "") & (df["Provider"] != "")]
@@ -181,7 +181,7 @@ def write_df_with_multilevel_header(
     header_font_name="Arial", header_font_size=10,
     body_font_name="Calibri", body_font_size=11,
     add_borders=False, left_align_first_col=True,
-    force_percent_from_col=None,  # now works for BOTH simple and MultiIndex columns
+    force_percent_from_col=None,  # format all cols from this index as %
 ):
     """
     - MultiIndex columns → two-row header (provider/metric).
@@ -239,20 +239,13 @@ def write_df_with_multilevel_header(
         data_start = r0 + 1
         cols_to_write = list(df.columns)
 
-    # setup percent-from index
+    # Identify percent columns
     first_percent_idx0 = None
     if force_percent_from_col is not None:
         first_percent_idx0 = max(0, int(force_percent_from_col) - 1)
 
     def is_percent_column(colname, j_idx):
-        # Treat as percent if:
-        # - column header text contains '%', OR
-        # - force_percent_from_col says so (columns to the right)
-        header_txt = ""
-        if isinstance(colname, tuple):
-            header_txt = str(colname[1])
-        else:
-            header_txt = str(colname)
+        header_txt = str(colname[1]) if isinstance(colname, tuple) else str(colname)
         by_name = "%" in header_txt
         by_force = (first_percent_idx0 is not None and j_idx >= first_percent_idx0)
         return by_name or by_force
@@ -264,21 +257,19 @@ def write_df_with_multilevel_header(
             cell = ws.cell(row=data_start+i, column=c0+j)
 
             if is_percent_column(colname, j):
+                # *** ALWAYS scale percent-of-100 to fraction and format as 0.00% ***
                 try:
                     vfloat = float(v)
-                    # 12.3 -> 0.123 so Excel shows 12.3%
-                    cell.value = (vfloat / 100.0) if vfloat > 1.0 else vfloat
-                    cell.number_format = "0.0%"
+                    cell.value = vfloat / 100.0
+                    cell.number_format = "0.00%"
                 except Exception:
                     cell.value = v
             else:
                 cell.value = v
 
             cell.font = body_font
-            if left_align_first_col and j == 0:
-                cell.alignment = Alignment(horizontal="left", vertical="center")
-            else:
-                cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.alignment = Alignment(horizontal="left" if (left_align_first_col and j == 0) else "center",
+                                       vertical="center")
 
     # last row highlight
     last_row = data_start + len(df) - 1
@@ -300,7 +291,7 @@ def write_df_with_multilevel_header(
         ws.column_dimensions[get_column_letter(c0+j)].width = max(12, len(str(label)) + 2)
 
 # --------------------------
-# Helpers to defeat the template (Network Spread H8 block)
+# Helpers (Network Spreads H8 block)
 # --------------------------
 def _norm(s: str) -> str:
     return "".join(ch for ch in s.lower() if ch.isalnum())
@@ -333,11 +324,9 @@ def remove_tables_in_range(ws: Worksheet, min_row: int, min_col: int, max_row: i
             pass
 
 def find_and_fix_header_block(ws: Worksheet, df: pd.DataFrame, theme, default_row=8, default_col=8):
-    targets = {"index", "product sub type", "product subtype", "product sub-type"}
-    row, col = default_row, default_col
-    found = False
-
-    # quick pass around expected position
+    # find the header cell (near H8)
+    targets = {"index", "product sub type", "product subtype", "product sub-type", "row labels"}
+    row, col, found = default_row, default_col, False
     for r in range(default_row-2, default_row+3):
         for c in range(default_col-2, default_col+3):
             v = ws.cell(row=r, column=c).value
@@ -345,8 +334,6 @@ def find_and_fix_header_block(ws: Worksheet, df: pd.DataFrame, theme, default_ro
                 row, col, found = r, c, True
                 break
         if found: break
-
-    # broader scan if still not found
     if not found:
         for r in range(6, 30):
             for c in range(7, 40):
@@ -361,10 +348,12 @@ def find_and_fix_header_block(ws: Worksheet, df: pd.DataFrame, theme, default_ro
 
     hdr_font = Font(name="Arial", size=10, bold=True, color=theme["title_font_color"])
     hdr_fill = PatternFill("solid", fgColor=theme["header_fill"])
+
     hc = ws.cell(row=row, column=col)
     hc.value = "Product Sub Type"; hc.font = hdr_font; hc.fill = hdr_fill
     hc.alignment = Alignment(horizontal="center", vertical="center")
 
+    # Apply % formatting to the body — ALWAYS scale by /100 and show 2dp
     first_data_row = row + 1
     first_percent_col = col + 1
     last_row = first_data_row + rows - 1
@@ -374,9 +363,8 @@ def find_and_fix_header_block(ws: Worksheet, df: pd.DataFrame, theme, default_ro
             cell = ws.cell(row=r, column=c)
             try:
                 vfloat = float(cell.value)
-                if vfloat > 1.0:
-                    cell.value = vfloat / 100.0
-                cell.number_format = "0.0%"
+                cell.value = vfloat / 100.0
+                cell.number_format = "0.00%"
             except Exception:
                 pass
 
@@ -394,23 +382,23 @@ def build_workbook(template_bytes: bytes, df: pd.DataFrame, provider_choice: str
     t2 = network_provider_table(df)         # Provider share (percent values)
     t3 = network_subtype_by_month_table(df) # Product Sub Type by Month (percent values)
 
-    # Firm Level (A6) — now formatted as %
+    # Firm Level (A6) — now proper percentages (ALWAYS /100), 2 dp
     write_df_with_multilevel_header(
         ws_firm, t1, start_row=6, start_col=1,
         header_fill=theme["header_fill"], title_font_color=theme["title_font_color"],
         add_borders=False, left_align_first_col=True,
-        force_percent_from_col=2  # first col is Firm Name; the rest are %s
+        force_percent_from_col=2
     )
 
-    # Network Spread — Provider table (A8) — now formatted as %
+    # Network Spreads — Provider table (A8) — proper percentages (ALWAYS /100), 2 dp
     write_df_with_multilevel_header(
         ws_network, t2, start_row=8, start_col=1,
         header_fill=theme["header_fill"], title_font_color=theme["title_font_color"],
         add_borders=True, left_align_first_col=True,
-        force_percent_from_col=2  # first col is Provider; the rest are %s
+        force_percent_from_col=2
     )
 
-    # Network Spread — Product Sub Type by Month (H8) (kept as before)
+    # Network Spreads — Product Sub Type by Month (H8) — proper percentages (ALWAYS /100), 2 dp
     rows, cols = t3.shape
     out_min_row, out_min_col = 8, 8
     out_max_row = out_min_row + rows
