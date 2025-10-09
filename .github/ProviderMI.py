@@ -5,7 +5,8 @@ import pandas as pd
 import streamlit as st
 from datetime import datetime
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter, range_boundaries
+from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import range_boundaries
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -67,7 +68,7 @@ def read_table(upload) -> pd.DataFrame:
     return df
 
 # --------------------------
-# Firm Level (unchanged logic)
+# Firm Level (calculations)
 # --------------------------
 def firm_level_table(df: pd.DataFrame) -> pd.DataFrame:
     d = df[(df["Firm Name"] != "") & (df["Provider"] != "")]
@@ -109,7 +110,7 @@ def firm_level_table(df: pd.DataFrame) -> pd.DataFrame:
     return final.reset_index()
 
 # --------------------------
-# Network Spread tables
+# Network Spread tables (calculations)
 # --------------------------
 def network_provider_table(df: pd.DataFrame) -> pd.DataFrame:
     d = df[df["Provider"] != ""].copy()
@@ -239,7 +240,7 @@ def write_df_with_multilevel_header(
         data_start = r0 + 1
         cols_to_write = list(df.columns)
 
-    # Identify percent columns
+    # identify percent columns
     first_percent_idx0 = None
     if force_percent_from_col is not None:
         first_percent_idx0 = max(0, int(force_percent_from_col) - 1)
@@ -257,7 +258,7 @@ def write_df_with_multilevel_header(
             cell = ws.cell(row=data_start+i, column=c0+j)
 
             if is_percent_column(colname, j):
-                # *** ALWAYS scale percent-of-100 to fraction and format as 0.00% ***
+                # ALWAYS scale percent-of-100 to fraction and format as 0.00%
                 try:
                     vfloat = float(v)
                     cell.value = vfloat / 100.0
@@ -324,7 +325,14 @@ def remove_tables_in_range(ws: Worksheet, min_row: int, min_col: int, max_row: i
             pass
 
 def find_and_fix_header_block(ws: Worksheet, df: pd.DataFrame, theme, default_row=8, default_col=8):
-    # find the header cell (near H8)
+    """
+    Force header text + deterministically write percent cells from df:
+    - Header becomes 'Product Sub Type'
+    - For every numeric value in df (which is a % of 100, e.g., 2.16), write value/100.0
+      and set number_format = '0.00%'.
+    This avoids any double-scaling regardless of what's currently in the sheet.
+    """
+    # 1) locate the header cell near H8
     targets = {"index", "product sub type", "product subtype", "product sub-type", "row labels"}
     row, col, found = default_row, default_col, False
     for r in range(default_row-2, default_row+3):
@@ -343,27 +351,27 @@ def find_and_fix_header_block(ws: Worksheet, df: pd.DataFrame, theme, default_ro
                     break
             if found: break
 
+    # 2) clear any Excel Table that might lock styles
     rows, cols = df.shape
     remove_tables_in_range(ws, row, col, row + rows, col + cols - 1)
 
+    # 3) enforce header cell text/style
     hdr_font = Font(name="Arial", size=10, bold=True, color=theme["title_font_color"])
     hdr_fill = PatternFill("solid", fgColor=theme["header_fill"])
-
     hc = ws.cell(row=row, column=col)
-    hc.value = "Product Sub Type"; hc.font = hdr_font; hc.fill = hdr_fill
+    hc.value = "Product Sub Type"
+    hc.font = hdr_font
+    hc.fill = hdr_fill
     hc.alignment = Alignment(horizontal="center", vertical="center")
 
-    # Apply % formatting to the body — ALWAYS scale by /100 and show 2dp
+    # 4) deterministically write the numeric body from df (value/100, format %)
     first_data_row = row + 1
-    first_percent_col = col + 1
-    last_row = first_data_row + rows - 1
-    last_col = col + cols - 1
-    for r in range(first_data_row, last_row + 1):
-        for c in range(first_percent_col, last_col + 1):
-            cell = ws.cell(row=r, column=c)
+    for i in range(rows):
+        for j in range(1, cols):  # skip first label column
+            cell = ws.cell(row=first_data_row + i, column=col + j)
             try:
-                vfloat = float(cell.value)
-                cell.value = vfloat / 100.0
+                v = float(df.iat[i, j])        # e.g., 2.16
+                cell.value = v / 100.0         # -> 0.0216
                 cell.number_format = "0.00%"
             except Exception:
                 pass
@@ -382,7 +390,7 @@ def build_workbook(template_bytes: bytes, df: pd.DataFrame, provider_choice: str
     t2 = network_provider_table(df)         # Provider share (percent values)
     t3 = network_subtype_by_month_table(df) # Product Sub Type by Month (percent values)
 
-    # Firm Level (A6) — now proper percentages (ALWAYS /100), 2 dp
+    # Firm Level (A6) — proper percentages (ALWAYS /100), 2 dp
     write_df_with_multilevel_header(
         ws_firm, t1, start_row=6, start_col=1,
         header_fill=theme["header_fill"], title_font_color=theme["title_font_color"],
@@ -398,7 +406,7 @@ def build_workbook(template_bytes: bytes, df: pd.DataFrame, provider_choice: str
         force_percent_from_col=2
     )
 
-    # Network Spreads — Product Sub Type by Month (H8) — proper percentages (ALWAYS /100), 2 dp
+    # Network Spreads — Product Sub Type by Month (H8)
     rows, cols = t3.shape
     out_min_row, out_min_col = 8, 8
     out_max_row = out_min_row + rows
@@ -412,6 +420,7 @@ def build_workbook(template_bytes: bytes, df: pd.DataFrame, provider_choice: str
         add_borders=True, left_align_first_col=True,
         force_percent_from_col=2
     )
+    # Final safeguard: header + write exact %s from df (no double scaling)
     find_and_fix_header_block(ws_network, t3, theme, default_row=8, default_col=8)
 
     out = io.BytesIO()
