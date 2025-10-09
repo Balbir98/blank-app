@@ -23,7 +23,10 @@ def provider_theme(name: str):
         theme["header_fill"] = "FBDB04"; theme["title_font_color"] = "1151AD"
     elif key in ["cirencester", "circencester", "cirencester friendly"]:
         theme["header_fill"] = "9A268C"; theme["title_font_color"] = "FFFFFF"
-    elif key in ["guardian", "lv", "lv="]:
+    elif key == "guardian":
+        # UPDATED: Guardian branding
+        theme["header_fill"] = "FFC000"; theme["title_font_color"] = "000000"
+    elif key in ["lv", "lv="]:
         theme["header_fill"] = "00B050"; theme["title_font_color"] = "FFFFFF"
     elif key in ["payment shield", "paymentshield", "payment-shield"]:
         theme["header_fill"] = "000000"; theme["title_font_color"] = "FFFFFF"
@@ -258,7 +261,6 @@ def write_df_with_multilevel_header(
             cell = ws.cell(row=data_start+i, column=c0+j)
 
             if is_percent_column(colname, j):
-                # ALWAYS scale percent-of-100 to fraction and format as 0.00%
                 try:
                     vfloat = float(v)
                     cell.value = vfloat / 100.0
@@ -272,7 +274,7 @@ def write_df_with_multilevel_header(
             cell.alignment = Alignment(horizontal="left" if (left_align_first_col and j == 0) else "center",
                                        vertical="center")
 
-    # last row highlight
+    # last row highlight (footer) — uses same header fill & bold font
     last_row = data_start + len(df) - 1
     for j in range(len(cols_to_write)):
         cell = ws.cell(row=last_row, column=c0+j)
@@ -325,14 +327,7 @@ def remove_tables_in_range(ws: Worksheet, min_row: int, min_col: int, max_row: i
             pass
 
 def find_and_fix_header_block(ws: Worksheet, df: pd.DataFrame, theme, default_row=8, default_col=8):
-    """
-    Force header text + deterministically write percent cells from df:
-    - Header becomes 'Product Sub Type'
-    - For every numeric value in df (which is a % of 100, e.g., 2.16), write value/100.0
-      and set number_format = '0.00%'.
-    This avoids any double-scaling regardless of what's currently in the sheet.
-    """
-    # 1) locate the header cell near H8
+    # locate the header cell near H8
     targets = {"index", "product sub type", "product subtype", "product sub-type", "row labels"}
     row, col, found = default_row, default_col, False
     for r in range(default_row-2, default_row+3):
@@ -351,11 +346,11 @@ def find_and_fix_header_block(ws: Worksheet, df: pd.DataFrame, theme, default_ro
                     break
             if found: break
 
-    # 2) clear any Excel Table that might lock styles
+    # clear any Excel Table that might lock styles
     rows, cols = df.shape
     remove_tables_in_range(ws, row, col, row + rows, col + cols - 1)
 
-    # 3) enforce header cell text/style
+    # enforce header cell text/style
     hdr_font = Font(name="Arial", size=10, bold=True, color=theme["title_font_color"])
     hdr_fill = PatternFill("solid", fgColor=theme["header_fill"])
     hc = ws.cell(row=row, column=col)
@@ -364,7 +359,7 @@ def find_and_fix_header_block(ws: Worksheet, df: pd.DataFrame, theme, default_ro
     hc.fill = hdr_fill
     hc.alignment = Alignment(horizontal="center", vertical="center")
 
-    # 4) deterministically write the numeric body from df (value/100, format %)
+    # deterministically write the numeric body from df (value/100, format %)
     first_data_row = row + 1
     for i in range(rows):
         for j in range(1, cols):  # skip first label column
@@ -390,7 +385,7 @@ def build_workbook(template_bytes: bytes, df: pd.DataFrame, provider_choice: str
     t2 = network_provider_table(df)         # Provider share (percent values)
     t3 = network_subtype_by_month_table(df) # Product Sub Type by Month (percent values)
 
-    # Firm Level (A6) — proper percentages (ALWAYS /100), 2 dp
+    # Firm Level (A6)
     write_df_with_multilevel_header(
         ws_firm, t1, start_row=6, start_col=1,
         header_fill=theme["header_fill"], title_font_color=theme["title_font_color"],
@@ -398,7 +393,7 @@ def build_workbook(template_bytes: bytes, df: pd.DataFrame, provider_choice: str
         force_percent_from_col=2
     )
 
-    # Network Spreads — Provider table (A8) — proper percentages (ALWAYS /100), 2 dp
+    # Network Spreads — Provider table (A8)
     write_df_with_multilevel_header(
         ws_network, t2, start_row=8, start_col=1,
         header_fill=theme["header_fill"], title_font_color=theme["title_font_color"],
@@ -420,7 +415,6 @@ def build_workbook(template_bytes: bytes, df: pd.DataFrame, provider_choice: str
         add_borders=True, left_align_first_col=True,
         force_percent_from_col=2
     )
-    # Final safeguard: header + write exact %s from df (no double scaling)
     find_and_fix_header_block(ws_network, t3, theme, default_row=8, default_col=8)
 
     out = io.BytesIO()
