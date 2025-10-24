@@ -72,7 +72,6 @@ def _apply_type_overrides(df: pd.DataFrame) -> pd.DataFrame:
 # Product aliasing (canonical names for MOF match)
 # ===========================
 PRODUCT_ALIASES = {
-    # case-insensitive keys (lowercased) -> canonical value
     "product focus emails": "Product Focus Emails",
     "product focus email": "Product Focus Emails",
     "promotional emails": "Promotional Emails",
@@ -162,13 +161,21 @@ def _is_unchecked(v) -> bool:
     s = str(v).strip().casefold()
     return s in {"", "no", "false", "0", "none", "n/a", "na", "not selected", "unchecked"}
 
+# NEW: types where a single cell may contain multiple comma-separated product choices
+SPLIT_ON_COMMA_TYPES = {  # case-insensitive match
+    "web page on adviser site",
+    "equity release workshops",
+}
+
 def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     """
     Parse Zoho wide export (row 0 = subheaders) → long rows, join Cost.
     - Product lookups to MOF Cost are by Product only (with product aliasing).
     - Regional Roadshow: sub-header(region)→Event Date; cell(ticked option)→Product.
     - Email Marketing: month subheader + comma-separated selections → 1 row per selection.
-    - Notes Q&A captured per provider into hidden cols `_note_q1`, `_note_q2` for the Notes sheet.
+    - Some types (e.g., Web page on Adviser site, Equity Release Workshops) may return
+      comma-separated product options in a single cell → split to 1 row per option.
+    - Notes Q&A captured per provider into hidden cols `_note_q1`, `_note_q2` (for Notes sheet).
     - Notes never become line items and never appear in the clean export.
     """
     if form_df.shape[0] < 2:
@@ -266,6 +273,23 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
                                 'Event Date (if applicable)': evt, 'Product': prod})
 
     out = pd.DataFrame.from_records(records)
+
+    # ---------- NEW: split comma-separated products for specific Types ----------
+    if not out.empty:
+        def _should_split_row(row):
+            t = str(row.get('Type', '')).casefold().strip()
+            p = str(row.get('Product', '') or '')
+            return (t in SPLIT_ON_COMMA_TYPES) and (',' in p)
+
+        if out.apply(_should_split_row, axis=1).any():
+            out['__prod_list__'] = out.apply(
+                lambda r: [x.strip() for x in str(r['Product']).split(',')] 
+                          if _should_split_row(r) else [r['Product']],
+                axis=1
+            )
+            out = out.explode('__prod_list__', ignore_index=True)
+            out['Product'] = out['__prod_list__'].astype(str).str.strip()
+            out.drop(columns='__prod_list__', inplace=True)
 
     # Attach repeated fields
     for c in REPEATED_FIRST:
