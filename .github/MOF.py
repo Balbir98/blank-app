@@ -599,7 +599,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             wb.save(out_bytes)
             out_bytes.seek(0)
             safe_provider = re.sub(r'[^A-Za-z0-9 _.-]+', '_', prov or "Unknown_Provider")
-            zf.writestr(f"templates/{safe_provider}.xlsx", out_bytes.getvalue())
+            zf.writestr(f"templates/{safe_provider}-WISHLIST.xlsx", out_bytes.getvalue())
 
     zip_buf.seek(0)
     return zip_buf
