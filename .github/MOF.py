@@ -217,7 +217,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
                 if parts:
                     for p in parts:
                         records.append({
-                            '_ridx': ridx,  # 0-based index in data_rows
+                            '_ridx': ridx,
                             'Type': current_type,
                             'Event Date (if applicable)': str(sub).strip(),
                             'Product': p
@@ -418,7 +418,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
     ACC_FMT = '_-£* #,##0.00_-;_-£* -#,##0.00_-;_-£* "-"??_-;_-@_-'
 
     with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        # IMPORTANT: one workbook per ORIGINAL Zoho row (_ridx)
+        # one workbook per ORIGINAL Zoho row (_ridx)
         for ridx, dfp in cleaned.groupby('_ridx', dropna=False):
             wb = load_workbook(BytesIO(template_bytes))
             ws = wb.active
@@ -581,14 +581,12 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             notes_ws["B2"].alignment = Alignment(wrap_text=False, vertical="top")
             notes_ws["B3"].alignment = Alignment(wrap_text=False, vertical="top")
 
-            # Save file per ORIGINAL Zoho row
+            # ===== SAVE FILE: Provider - Contact - WISHLIST.xlsx (no numbers) =====
             out_bytes = BytesIO()
             wb.save(out_bytes); out_bytes.seek(0)
-            # human-ish index: add 2 (header row + 0-based)
-            submission_no = int(ridx) + 2
             safe_provider = re.sub(r'[^A-Za-z0-9 _.-]+', '_', prov or "Unknown_Provider")
             safe_contact  = re.sub(r'[^A-Za-z0-9 _.-]+', '_', nm or "Unknown_Contact")
-            zf.writestr(f"templates/{submission_no:03d} - {safe_provider} - {safe_contact}.xlsx", out_bytes.getvalue())
+            zf.writestr(f"templates/{safe_provider} - {safe_contact} - WISHLIST.xlsx", out_bytes.getvalue())
 
     zip_buf.seek(0)
     return zip_buf
@@ -653,9 +651,7 @@ if st.button("Submit", key="submit_wishlist"):
                 except Exception as e:
                     st.exception(RuntimeError(f"Template population failed: {e}"))
 
-            # success + counts
             zip_buf.seek(0)
-            # Count unique submission templates created:
             num_templates = cleaned_internal['_ridx'].nunique()
             st.success(f"Done. Cleaned {len(cleaned_to_export)} rows across {num_templates} submission template(s).")
 
