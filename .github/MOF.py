@@ -170,9 +170,10 @@ SPLIT_ON_COMMA_TYPES = {
 def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     """
     Parse Zoho wide export (row 0 = subheaders) → long rows, then join Cost by (Type, Product).
+    Produces a hidden '_ridx' key that identifies the ORIGINAL Zoho row (1-based after header).
     """
     if form_df.shape[0] < 2:
-        return pd.DataFrame(columns=REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?'])
+        return pd.DataFrame(columns=['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?'])
 
     subheaders = form_df.iloc[0]
     data_rows = form_df.iloc[1:].reset_index(drop=True)
@@ -216,7 +217,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
                 if parts:
                     for p in parts:
                         records.append({
-                            '_ridx': ridx,
+                            '_ridx': ridx,  # 0-based index in data_rows
                             'Type': current_type,
                             'Event Date (if applicable)': str(sub).strip(),
                             'Product': p
@@ -247,7 +248,6 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
                 else:
                     prod = text_val
                     evt = str(sub).strip() if _is_event_label(sub) else None
-                # Split-on-comma for designated Types
                 if current_type and current_type.casefold().strip() in SPLIT_ON_COMMA_TYPES and ',' in str(prod):
                     for p in [x.strip() for x in str(prod).split(',') if x.strip()]:
                         records.append({'_ridx': ridx, 'Type': current_type, 'Event Date (if applicable)': evt, 'Product': p})
@@ -264,7 +264,6 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
                     else:
                         evt = None
                         prod = str(sub).strip() if not pd.isna(sub) else text_val
-                # Split-on-comma for designated Types
                 if current_type and current_type.casefold().strip() in SPLIT_ON_COMMA_TYPES and ',' in str(prod):
                     for p in [x.strip() for x in str(prod).split(',') if x.strip()]:
                         records.append({'_ridx': ridx, 'Type': current_type, 'Event Date (if applicable)': evt, 'Product': p})
@@ -275,14 +274,14 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
 
     out = pd.DataFrame.from_records(records)
 
-    # Attach repeated fields
+    # Attach repeated fields (per original row)
     for c in REPEATED_FIRST:
         if c in data_rows.columns:
             out[c] = out['_ridx'].map(data_rows[c])
         else:
             out[c] = None
 
-    # Attach per-provider notes answers (hidden)
+    # Attach per-row notes answers (hidden)
     if q1_col:
         q1_by_ridx = data_rows[q1_col]
         out['_note_q1'] = out['_ridx'].map(q1_by_ridx).astype(str).apply(lambda s: "" if s.lower() == "nan" else s).fillna("")
@@ -295,20 +294,13 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
         out['_note_q2'] = ""
 
     if out.empty:
-        return pd.DataFrame(columns=REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?'])
+        return pd.DataFrame(columns=['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?'])
 
-    # Remove any stray rows where Type equals a notes header (safety)
+    # Strip any stray rows where Type equals a notes header
     notes_lc = {h.casefold().strip() for h in NOTES_SOURCE_HEADERS}
     out = out[~out['Type'].astype(str).str.casefold().str.strip().isin(notes_lc)].copy()
 
-    # Keep key outputs (plus hidden notes)
-    out = out[['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','_note_q1','_note_q2']].copy()
-
-    # Safety: if a regional row accidentally has the location in Product, blank it
-    mask_rre = out['Type'].apply(_is_rre_type).fillna(False)
-    out.loc[mask_rre & out['Product'].apply(_looks_like_location), 'Product'] = None
-
-    # Apply product aliasing then type overrides
+    # Product cleanup → overrides
     out['Product'] = out['Product'].apply(_apply_product_aliases)
     out = _apply_type_overrides(out)
 
@@ -332,16 +324,15 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
 
     out['Type_norm'] = out['Type'].apply(_norm)
     out['Product_norm'] = out['Product'].apply(_norm).apply(_apply_product_aliases)
-
     out = out.merge(costs2, on=['Type_norm','Product_norm'], how='left').drop(columns=['Type_norm','Product_norm'])
 
-    # Final internal columns (include hidden notes answers)
-    final_cols_internal = REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost']
+    # Final columns (keep _ridx so we can generate 1 template per submission row)
+    final_cols_internal = ['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost']
     if f2f_col_name:
         out = out.rename(columns={f2f_col_name: 'F2F or Online?'})
         final_cols_internal += ['F2F or Online?']
     final_cols_internal += ['_note_q1','_note_q2']
-    out = out[final_cols_internal].sort_values(['Random ID','Provider Name','Name','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
+    out = out[final_cols_internal].sort_values(['_ridx','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
 
     return out
 
@@ -402,7 +393,6 @@ def _first_value_cell_right(ws, r, c, try_two=True):
         return ws.cell(r, cc)
     return ws.cell(r, c + 1)
 
-# Notes sheet helper (find or create)
 def _get_notes_ws(wb):
     for name in wb.sheetnames:
         if str(name).strip().casefold() == "notes":
@@ -415,13 +405,12 @@ def _get_notes_ws(wb):
 def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame | None) -> BytesIO:
     # Build a (Type, Product)->F2F map if we have a cost sheet
     f2f_map = {}
-    if costs_df is not None:
+    if costs_df is not None and 'F2F or Online?' in costs_df.columns:
         def _n(s): return None if pd.isna(s) else str(s).strip()
         tmp = costs_df.copy()
-        if 'F2F or Online?' in tmp.columns:
-            tmp['Type_norm'] = tmp['Type'].apply(_n)
-            tmp['Product_norm'] = tmp['Product'].apply(_n).apply(_apply_product_aliases)
-            f2f_map = dict(zip(zip(tmp['Type_norm'], tmp['Product_norm']), tmp['F2F or Online?']))
+        tmp['Type_norm'] = tmp['Type'].apply(_n)
+        tmp['Product_norm'] = tmp['Product'].apply(_n).apply(_apply_product_aliases)
+        f2f_map = dict(zip(zip(tmp['Type_norm'], tmp['Product_norm']), tmp['F2F or Online?']))
 
     zip_buf = BytesIO()
     dotted = Side(style='dotted')
@@ -429,23 +418,23 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
     ACC_FMT = '_-£* #,##0.00_-;_-£* -#,##0.00_-;_-£* "-"??_-;_-@_-'
 
     with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        # GROUP BY provider + contact (separate template per submitter)
-        for (provider, contact_name, contact_email), dfp in cleaned.groupby(['Provider Name','Name','Email'], dropna=False):
+        # IMPORTANT: one workbook per ORIGINAL Zoho row (_ridx)
+        for ridx, dfp in cleaned.groupby('_ridx', dropna=False):
             wb = load_workbook(BytesIO(template_bytes))
             ws = wb.active
 
-            # Fixed cells
-            prov = "" if pd.isna(provider) else str(provider)
-            nm   = _sanitize_name(contact_name)
+            # Pull repeated fields from the first row of this submission
+            prov = "" if 'Provider Name' not in dfp.columns else ("" if pd.isna(dfp['Provider Name'].iloc[0]) else str(dfp['Provider Name'].iloc[0]))
+            nm   = _sanitize_name(dfp['Name'].iloc[0] if 'Name' in dfp.columns and len(dfp) else "")
             ph   = "" if 'Phone' not in dfp.columns else ("" if pd.isna(dfp['Phone'].iloc[0]) else str(dfp['Phone'].iloc[0]))
-            em   = "" if pd.isna(contact_email) else str(contact_email)
+            em   = "" if 'Email' not in dfp.columns else ("" if pd.isna(dfp['Email'].iloc[0]) else str(dfp['Email'].iloc[0]))
             wti  = dfp['When To Invoice'].iloc[0] if 'When To Invoice' in dfp.columns else ""
 
             ws['B4'] = prov
             ws['B6'] = nm
             ws['D4'] = wti
             ws['D6'] = ph
-            ws['F6'] = em   # email goes here
+            ws['F6'] = em
 
             # Secondary contacts
             def _first(dfcol):
@@ -470,11 +459,11 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             c_Total  = _get_col(hmap, "Total")
             c_Notes  = _get_col(hmap, "Notes")
 
-            # Header font = white
+            # White header font
             for c in [c_Type,c_Prod,c_Det,c_Date,c_Charge,c_Qty,c_Total,c_Notes]:
                 if c: ws.cell(hdr_row, c).font = header_font
 
-            # Insert rows for n items
+            # Insert enough rows
             start_row = hdr_row + 1
             n = len(dfp)
             if n > 1:
@@ -510,7 +499,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 if c_Notes:
                     ws.cell(rr, c_Notes, None)
 
-            # Borders across table (dotted)
+            # Dotted borders
             last_row = start_row + max(n - 1, 0)
             table_cols = [c for c in [c_Type,c_Prod,c_Det,c_Date,c_Charge,c_Qty,c_Total,c_Notes] if c]
             first_col, last_col = min(table_cols), max(table_cols)
@@ -524,20 +513,14 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             sum_col = c_Total if c_Total else c_Charge
             if sum_col:
                 sum_rng = f"{get_column_letter(sum_col)}{start_row}:{get_column_letter(sum_col)}{last_row}"
-
-                # Detect label column from "Total Package"
                 label_col = None
                 for c in range(1, ws.max_column + 1):
                     for rr in range(last_row + 1, min(ws.max_row, last_row + 200) + 1):
                         v = ws.cell(rr, c).value
                         if v and _canon_label(v) == _canon_label("Total Package"):
-                            label_col = c
-                            break
-                    if label_col:
-                        break
-                if not label_col:
-                    label_col = 8
-
+                            label_col = c; break
+                    if label_col: break
+                if not label_col: label_col = 8
                 value_col = label_col + 1
                 search_start = last_row + 1
                 search_end   = min(ws.max_row, last_row + 200)
@@ -546,16 +529,14 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 tp_coord = None
                 if r_tp:
                     tp_cell = _first_value_cell_right(ws, r_tp, label_col)
-                    tp_cell.value = f"=SUM({sum_rng})"
-                    tp_cell.number_format = ACC
+                    tp_cell.value = f"=SUM({sum_rng})"; tp_cell.number_format = ACC
                     tp_coord = tp_cell.coordinate
 
                 r_disc, _ = _find_label_in_column(ws, "Discount", label_col, search_start, search_end)
                 disc_coord = None
                 if r_disc:
                     disc_cell = _first_value_cell_right(ws, r_disc, label_col)
-                    if disc_cell.value is None:
-                        disc_cell.value = 0
+                    if disc_cell.value is None: disc_cell.value = 0
                     disc_cell.number_format = ACC
                     disc_coord = disc_cell.coordinate
 
@@ -563,38 +544,31 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 tpp_coord = None
                 if r_tpp and tp_coord and disc_coord:
                     tpp_cell = _first_value_cell_right(ws, r_tpp, label_col)
-                    tpp_cell.value = f"={tp_coord}-{disc_coord}"
-                    tpp_cell.number_format = ACC
+                    tpp_cell.value = f"={tp_coord}-{disc_coord}"; tpp_cell.number_format = ACC
                     tpp_coord = tpp_cell.coordinate
 
                 r_vat, _ = _find_label_in_column(ws, "VAT", label_col, search_start, search_end)
                 vat_coord = None
                 if r_vat and tpp_coord:
                     vat_cell = _first_value_cell_right(ws, r_vat, label_col)
-                    vat_cell.value = f"={tpp_coord}/5"
-                    vat_cell.number_format = ACC
+                    vat_cell.value = f"={tpp_coord}/5"; vat_cell.number_format = ACC
                     vat_coord = vat_cell.coordinate
 
                 r_opp, _ = _find_label_in_column(ws, "Overall Package Price", label_col, search_start, search_end)
-                if not r_opp and r_vat:
-                    r_opp = r_vat + 2
+                if not r_opp and r_vat: r_opp = r_vat + 2
                 if r_opp and tpp_coord and vat_coord:
                     opp_cell = ws.cell(r_opp, value_col)
-                    opp_cell.value = f"={tpp_coord}+{vat_coord}"
-                    opp_cell.number_format = ACC
+                    opp_cell.value = f"={tpp_coord}+{vat_coord}"; opp_cell.number_format = ACC
 
-            # ---------- Notes sheet (Q&A, UNWRAPPED) ----------
+            # ---------- Notes sheet (Q&A, unwrapped) ----------
             notes_ws = _get_notes_ws(wb)
             q1_label = MAIN_NOTES_QUESTIONS[0]
             q2_label = MAIN_NOTES_QUESTIONS[1]
-            notes_ws["A2"].value = q1_label
-            notes_ws["A3"].value = q2_label
-            notes_ws["A2"].alignment = Alignment(wrap_text=False, vertical="top")
-            notes_ws["A3"].alignment = Alignment(wrap_text=False, vertical="top")
+            notes_ws["A2"].value = q1_label; notes_ws["A2"].alignment = Alignment(wrap_text=False, vertical="top")
+            notes_ws["A3"].value = q2_label; notes_ws["A3"].alignment = Alignment(wrap_text=False, vertical="top")
 
             def _first_nonempty(colname):
-                if colname not in dfp.columns:
-                    return ""
+                if colname not in dfp.columns: return ""
                 for s in dfp[colname].astype(str).tolist():
                     if s and s.strip() and s.strip().lower() != "nan":
                         return s.strip()
@@ -602,19 +576,19 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
 
             ans1 = _first_nonempty("_note_q1")
             ans2 = _first_nonempty("_note_q2")
-
             notes_ws["B2"].value = ans1 if ans1 else None
             notes_ws["B3"].value = ans2 if ans2 else None
             notes_ws["B2"].alignment = Alignment(wrap_text=False, vertical="top")
             notes_ws["B3"].alignment = Alignment(wrap_text=False, vertical="top")
 
-            # Save file per provider+contact (prevents overwrites)
+            # Save file per ORIGINAL Zoho row
             out_bytes = BytesIO()
-            wb.save(out_bytes)
-            out_bytes.seek(0)
+            wb.save(out_bytes); out_bytes.seek(0)
+            # human-ish index: add 2 (header row + 0-based)
+            submission_no = int(ridx) + 2
             safe_provider = re.sub(r'[^A-Za-z0-9 _.-]+', '_', prov or "Unknown_Provider")
             safe_contact  = re.sub(r'[^A-Za-z0-9 _.-]+', '_', nm or "Unknown_Contact")
-            zf.writestr(f"templates/{safe_provider} - {safe_contact} - WISHLIST.xlsx", out_bytes.getvalue())
+            zf.writestr(f"templates/{submission_no:03d} - {safe_provider} - {safe_contact}.xlsx", out_bytes.getvalue())
 
     zip_buf.seek(0)
     return zip_buf
@@ -636,7 +610,7 @@ div.stDownloadButton > button:first-child { background-color: #2a9d8f !important
 st.markdown("""
 Upload your files and click **Submit** to get a ZIP containing:
 
-**MOF Templates** → one populated workbook per Provider/Contact  
+**MOF Templates** → one workbook per Zoho submission row  
 **Cleaned Data** → your single cleaned dataset
 """)
 
@@ -656,19 +630,15 @@ if st.button("Submit", key="submit_wishlist"):
             try:
                 form_df = _read_any_table(form_file, preferred_sheet_name="Form")
                 costs_df = _read_any_table(cost_file)
-                cleaned_internal = transform_wishlist(form_df, costs_df)  # includes _note_q1/_note_q2
+                cleaned_internal = transform_wishlist(form_df, costs_df)  # includes _ridx + _note_q1/_note_q2
             except Exception as e:
                 st.exception(e)
                 st.stop()
 
-            # Build results.zip (cleaned export drops hidden notes cols)
+            # Build results.zip (cleaned export drops hidden note answers but keeps _ridx)
             zip_buf = BytesIO()
             with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
                 cleaned_to_export = cleaned_internal.drop(columns=['_note_q1','_note_q2'], errors='ignore')
-                cleaned_to_export = cleaned_to_export.drop(
-                    columns=[h for h in NOTES_SOURCE_HEADERS if h in cleaned_to_export.columns],
-                    errors='ignore'
-                )
 
                 cleaned_bytes = BytesIO()
                 cleaned_to_export.to_excel(cleaned_bytes, index=False)
@@ -683,8 +653,11 @@ if st.button("Submit", key="submit_wishlist"):
                 except Exception as e:
                     st.exception(RuntimeError(f"Template population failed: {e}"))
 
+            # success + counts
             zip_buf.seek(0)
-            st.success(f"Done. Cleaned {len(cleaned_to_export)} rows.")
+            # Count unique submission templates created:
+            num_templates = cleaned_internal['_ridx'].nunique()
+            st.success(f"Done. Cleaned {len(cleaned_to_export)} rows across {num_templates} submission template(s).")
 
             missing_costs = cleaned_to_export['Cost'].isna().sum()
             if missing_costs > 0:
@@ -692,7 +665,7 @@ if st.button("Submit", key="submit_wishlist"):
                 with st.expander("Preview rows missing Cost"):
                     st.dataframe(
                         cleaned_to_export[cleaned_to_export['Cost'].isna()][
-                            ['Provider Name','Name','Type','Event Date (if applicable)','Product']
+                            ['_ridx','Provider Name','Name','Type','Event Date (if applicable)','Product']
                         ].head(500)
                     )
 
