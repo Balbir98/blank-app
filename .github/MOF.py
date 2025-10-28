@@ -161,22 +161,15 @@ def _is_unchecked(v) -> bool:
     s = str(v).strip().casefold()
     return s in {"", "no", "false", "0", "none", "n/a", "na", "not selected", "unchecked"}
 
-# NEW: types where a single cell may contain multiple comma-separated product choices
-SPLIT_ON_COMMA_TYPES = {  # case-insensitive match
+# Types where a single cell may contain multiple comma-separated product choices
+SPLIT_ON_COMMA_TYPES = {
     "web page on adviser site",
     "equity release workshops",
 }
 
 def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Parse Zoho wide export (row 0 = subheaders) → long rows, join Cost.
-    - Product lookups to MOF Cost are by Product only (with product aliasing).
-    - Regional Roadshow: sub-header(region)→Event Date; cell(ticked option)→Product.
-    - Email Marketing: month subheader + comma-separated selections → 1 row per selection.
-    - Some types (e.g., Web page on Adviser site, Equity Release Workshops) may return
-      comma-separated product options in a single cell → split to 1 row per option.
-    - Notes Q&A captured per provider into hidden cols `_note_q1`, `_note_q2` (for Notes sheet).
-    - Notes never become line items and never appear in the clean export.
+    Parse Zoho wide export (row 0 = subheaders) → long rows, then join Cost by (Type, Product).
     """
     if form_df.shape[0] < 2:
         return pd.DataFrame(columns=REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?'])
@@ -215,7 +208,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
             if _is_notes_column(col):
                 continue
 
-            # Email Marketing: month + comma-separated selections
+            # Email Marketing: month + comma-separated selections → 1 row per selection
             if current_type and _is_email_marketing_type(current_type) and sub is not None and _is_event_label(sub):
                 if _is_unchecked(text_val):
                     continue
@@ -230,7 +223,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
                         })
                     continue
 
-            # Regional roadshow matrix
+            # Regional roadshow matrix: Location (subheader) → Event Date, cell text → Product
             if current_type and _is_rre_type(current_type) and sub is not None and _looks_like_location(str(sub)):
                 if _is_unchecked(text_val):
                     continue
@@ -242,7 +235,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
                 })
                 continue
 
-            # Default behaviour
+            # Default behaviour (plus comma-split for specific Types)
             if not str(col).startswith('Unnamed'):
                 if col in wanted_cols or col in ['Added Time','Referrer Name','Task Owner']:
                     continue
@@ -254,8 +247,12 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
                 else:
                     prod = text_val
                     evt = str(sub).strip() if _is_event_label(sub) else None
-                records.append({'_ridx': ridx, 'Type': current_type,
-                                'Event Date (if applicable)': evt, 'Product': prod})
+                # Split-on-comma for designated Types
+                if current_type and current_type.casefold().strip() in SPLIT_ON_COMMA_TYPES and ',' in str(prod):
+                    for p in [x.strip() for x in str(prod).split(',') if x.strip()]:
+                        records.append({'_ridx': ridx, 'Type': current_type, 'Event Date (if applicable)': evt, 'Product': p})
+                else:
+                    records.append({'_ridx': ridx, 'Type': current_type, 'Event Date (if applicable)': evt, 'Product': prod})
             else:
                 if re.search(r'\boption(s)?\b', text_val, flags=re.I):
                     prod = str(sub).strip() if not pd.isna(sub) else text_val
@@ -267,29 +264,16 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
                     else:
                         evt = None
                         prod = str(sub).strip() if not pd.isna(sub) else text_val
-                if current_type is None:
-                    continue
-                records.append({'_ridx': ridx, 'Type': current_type,
-                                'Event Date (if applicable)': evt, 'Product': prod})
+                # Split-on-comma for designated Types
+                if current_type and current_type.casefold().strip() in SPLIT_ON_COMMA_TYPES and ',' in str(prod):
+                    for p in [x.strip() for x in str(prod).split(',') if x.strip()]:
+                        records.append({'_ridx': ridx, 'Type': current_type, 'Event Date (if applicable)': evt, 'Product': p})
+                else:
+                    if current_type is None:
+                        continue
+                    records.append({'_ridx': ridx, 'Type': current_type, 'Event Date (if applicable)': evt, 'Product': prod})
 
     out = pd.DataFrame.from_records(records)
-
-    # ---------- NEW: split comma-separated products for specific Types ----------
-    if not out.empty:
-        def _should_split_row(row):
-            t = str(row.get('Type', '')).casefold().strip()
-            p = str(row.get('Product', '') or '')
-            return (t in SPLIT_ON_COMMA_TYPES) and (',' in p)
-
-        if out.apply(_should_split_row, axis=1).any():
-            out['__prod_list__'] = out.apply(
-                lambda r: [x.strip() for x in str(r['Product']).split(',')] 
-                          if _should_split_row(r) else [r['Product']],
-                axis=1
-            )
-            out = out.explode('__prod_list__', ignore_index=True)
-            out['Product'] = out['__prod_list__'].astype(str).str.strip()
-            out.drop(columns='__prod_list__', inplace=True)
 
     # Attach repeated fields
     for c in REPEATED_FIRST:
@@ -328,24 +312,28 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     out['Product'] = out['Product'].apply(_apply_product_aliases)
     out = _apply_type_overrides(out)
 
-    # Costs join by Product only
+    # ---- Costs join by (Type, Product) ----
     def _norm(s): return None if pd.isna(s) else str(s).strip()
-    if 'Product' not in costs_df.columns or 'Cost' not in costs_df.columns:
-        raise ValueError("Cost sheet must contain columns: Product, Cost")
+    if not {'Product','Cost','Type'}.issubset(costs_df.columns):
+        raise ValueError("Cost sheet must contain columns: Type, Product, Cost")
 
     costs2 = costs_df.copy()
+    costs2['Type_norm'] = costs2['Type'].apply(_norm)
     costs2['Product_norm'] = costs2['Product'].apply(_norm).apply(_apply_product_aliases)
-    bring_cols = ['Product_norm','Cost']
+
+    bring_cols = ['Type_norm','Product_norm','Cost']
     f2f_col_name = None
     for cand in ['F2F or Online?', 'F2F or Online', 'F2F/Online']:
         if cand in costs2.columns:
             bring_cols.append(cand)
             f2f_col_name = cand
             break
-    costs2 = costs2[bring_cols].drop_duplicates(subset=['Product_norm'], keep='first')
+    costs2 = costs2[bring_cols].drop_duplicates(subset=['Type_norm','Product_norm'], keep='first')
 
+    out['Type_norm'] = out['Type'].apply(_norm)
     out['Product_norm'] = out['Product'].apply(_norm).apply(_apply_product_aliases)
-    out = out.merge(costs2, on=['Product_norm'], how='left').drop(columns=['Product_norm'])
+
+    out = out.merge(costs2, on=['Type_norm','Product_norm'], how='left').drop(columns=['Type_norm','Product_norm'])
 
     # Final internal columns (include hidden notes answers)
     final_cols_internal = REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost']
@@ -353,7 +341,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
         out = out.rename(columns={f2f_col_name: 'F2F or Online?'})
         final_cols_internal += ['F2F or Online?']
     final_cols_internal += ['_note_q1','_note_q2']
-    out = out[final_cols_internal].sort_values(['Random ID','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
+    out = out[final_cols_internal].sort_values(['Random ID','Provider Name','Name','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
 
     return out
 
@@ -425,13 +413,15 @@ def _get_notes_ws(wb):
 # Template population
 # ===========================
 def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs_df: pd.DataFrame | None) -> BytesIO:
-    # Build a product->F2F map if we have a cost sheet
+    # Build a (Type, Product)->F2F map if we have a cost sheet
     f2f_map = {}
-    if costs_df is not None and 'F2F or Online?' in costs_df.columns:
+    if costs_df is not None:
         def _n(s): return None if pd.isna(s) else str(s).strip()
-        tmp = costs_df[['Product','F2F or Online?']].copy()
-        tmp['Product_norm'] = tmp['Product'].apply(_n).apply(_apply_product_aliases)
-        f2f_map = dict(zip(tmp['Product_norm'], tmp['F2F or Online?']))
+        tmp = costs_df.copy()
+        if 'F2F or Online?' in tmp.columns:
+            tmp['Type_norm'] = tmp['Type'].apply(_n)
+            tmp['Product_norm'] = tmp['Product'].apply(_n).apply(_apply_product_aliases)
+            f2f_map = dict(zip(zip(tmp['Type_norm'], tmp['Product_norm']), tmp['F2F or Online?']))
 
     zip_buf = BytesIO()
     dotted = Side(style='dotted')
@@ -439,15 +429,16 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
     ACC_FMT = '_-£* #,##0.00_-;_-£* -#,##0.00_-;_-£* "-"??_-;_-@_-'
 
     with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for provider, dfp in cleaned.groupby('Provider Name', dropna=False):
+        # GROUP BY provider + contact (separate template per submitter)
+        for (provider, contact_name, contact_email), dfp in cleaned.groupby(['Provider Name','Name','Email'], dropna=False):
             wb = load_workbook(BytesIO(template_bytes))
             ws = wb.active
 
             # Fixed cells
             prov = "" if pd.isna(provider) else str(provider)
-            nm   = _sanitize_name(dfp['Name'].iloc[0] if 'Name' in dfp.columns and len(dfp) else "")
+            nm   = _sanitize_name(contact_name)
             ph   = "" if 'Phone' not in dfp.columns else ("" if pd.isna(dfp['Phone'].iloc[0]) else str(dfp['Phone'].iloc[0]))
-            em   = "" if 'Email' not in dfp.columns else ("" if pd.isna(dfp['Email'].iloc[0]) else str(dfp['Email'].iloc[0]))
+            em   = "" if pd.isna(contact_email) else str(contact_email)
             wti  = dfp['When To Invoice'].iloc[0] if 'When To Invoice' in dfp.columns else ""
 
             ws['B4'] = prov
@@ -498,11 +489,10 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
                 charge = r.get("Cost", None)
                 qty = 1
                 details = r.get("F2F or Online?", "")
-                if not details:
-                    pk = None if pd.isna(prod) else str(prod).strip()
-                    pk = _apply_product_aliases(pk)
-                    if pk in f2f_map:
-                        details = f2f_map.get(pk, "")
+
+                if not details and costs_df is not None:
+                    k = (str(typ).strip(), _apply_product_aliases(str(prod).strip()))
+                    details = f2f_map.get(k, "")
 
                 if c_Type:   ws.cell(rr, c_Type, typ)
                 if c_Prod:   ws.cell(rr, c_Prod, prod)
@@ -618,12 +608,13 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             notes_ws["B2"].alignment = Alignment(wrap_text=False, vertical="top")
             notes_ws["B3"].alignment = Alignment(wrap_text=False, vertical="top")
 
-            # Save provider file into zip
+            # Save file per provider+contact (prevents overwrites)
             out_bytes = BytesIO()
             wb.save(out_bytes)
             out_bytes.seek(0)
             safe_provider = re.sub(r'[^A-Za-z0-9 _.-]+', '_', prov or "Unknown_Provider")
-            zf.writestr(f"templates/{safe_provider}-WISHLIST.xlsx", out_bytes.getvalue())
+            safe_contact  = re.sub(r'[^A-Za-z0-9 _.-]+', '_', nm or "Unknown_Contact")
+            zf.writestr(f"templates/{safe_provider} - {safe_contact}.xlsx", out_bytes.getvalue())
 
     zip_buf.seek(0)
     return zip_buf
@@ -645,7 +636,7 @@ div.stDownloadButton > button:first-child { background-color: #2a9d8f !important
 st.markdown("""
 Upload your files and click **Submit** to get a ZIP containing:
 
-**MOF Templates** → one populated workbook per Provider Name  
+**MOF Templates** → one populated workbook per Provider/Contact  
 **Cleaned Data** → your single cleaned dataset
 """)
 
@@ -697,11 +688,11 @@ if st.button("Submit", key="submit_wishlist"):
 
             missing_costs = cleaned_to_export['Cost'].isna().sum()
             if missing_costs > 0:
-                st.warning(f"{missing_costs} row(s) have no Cost match by Product. Ensure Product exists in the MOF Cost Sheet.")
+                st.warning(f"{missing_costs} row(s) have no Cost match by (Type, Product). Ensure both exist in the MOF Cost Sheet.")
                 with st.expander("Preview rows missing Cost"):
                     st.dataframe(
                         cleaned_to_export[cleaned_to_export['Cost'].isna()][
-                            ['Provider Name','Type','Event Date (if applicable)','Product']
+                            ['Provider Name','Name','Type','Event Date (if applicable)','Product']
                         ].head(500)
                     )
 
