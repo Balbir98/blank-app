@@ -134,7 +134,7 @@ def _is_event_label(x):
     s = str(x).strip()
     months3 = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec']
     if any(s.lower().startswith(m) for m in months3): return True
-    if s in ['Q1','Q2','Q3','Q4','Monthly','Quarterly']: return True
+    if s in ['Q1','Q2','Q3','Monthly','Quarterly']: return True
     if re.search(r'\d', s): return True
     return False
 
@@ -170,10 +170,12 @@ SPLIT_ON_COMMA_TYPES = {
 def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.DataFrame:
     """
     Parse Zoho wide export (row 0 = subheaders) → long rows, then join Cost by (Type, Product).
-    Produces a hidden '_ridx' key that identifies the ORIGINAL Zoho row (1-based after header).
+    Includes:
+      - Events or Marketing (from cost sheet) in clean output
+      - Added Time from Zoho (dd/mm/yyyy) in clean output
     """
     if form_df.shape[0] < 2:
-        return pd.DataFrame(columns=['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?'])
+        return pd.DataFrame(columns=['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?','Events or Marketing','Added Time'])
 
     subheaders = form_df.iloc[0]
     data_rows = form_df.iloc[1:].reset_index(drop=True)
@@ -190,6 +192,18 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     # Resolve the two *main* notes columns if present
     q1_col = col_lc_map.get(MAIN_NOTES_QUESTIONS[0].lower())
     q2_col = col_lc_map.get(MAIN_NOTES_QUESTIONS[1].lower())
+
+    # "Added Time" column from Zoho (optional)
+    added_time_col = None
+    for cand in ["Added Time", "added time", "AddedTime", "Created Time", "Created time"]:
+        if cand.lower() in col_lc_map:
+            added_time_col = col_lc_map[cand.lower()]
+            break
+    if added_time_col and added_time_col in data_rows.columns:
+        # Convert to dd/mm/yyyy string per row
+        added_series = pd.to_datetime(data_rows[added_time_col], errors='coerce').dt.strftime('%d/%m/%Y')
+    else:
+        added_series = pd.Series([""] * len(data_rows))
 
     # ---- Parse into line items (excluding notes columns) ----
     records = []
@@ -224,7 +238,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
                         })
                     continue
 
-            # Regional roadshow matrix: Location (subheader) → Event Date, cell text → Product
+            # Regional roadshow matrix
             if current_type and _is_rre_type(current_type) and sub is not None and _looks_like_location(str(sub)):
                 if _is_unchecked(text_val):
                     continue
@@ -281,6 +295,9 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
         else:
             out[c] = None
 
+    # Attach Added Time (formatted)
+    out['Added Time'] = out['_ridx'].map(added_series)
+
     # Attach per-row notes answers (hidden)
     if q1_col:
         q1_by_ridx = data_rows[q1_col]
@@ -294,9 +311,9 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
         out['_note_q2'] = ""
 
     if out.empty:
-        return pd.DataFrame(columns=['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?'])
+        return pd.DataFrame(columns=['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?','Events or Marketing','Added Time'])
 
-    # Strip any stray rows where Type equals a notes header
+    # Remove any stray rows where Type equals a notes header
     notes_lc = {h.casefold().strip() for h in NOTES_SOURCE_HEADERS}
     out = out[~out['Type'].astype(str).str.casefold().str.strip().isin(notes_lc)].copy()
 
@@ -304,7 +321,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     out['Product'] = out['Product'].apply(_apply_product_aliases)
     out = _apply_type_overrides(out)
 
-    # ---- Costs join by (Type, Product) ----
+    # ---- Costs join by (Type, Product) + pull Events/Marketing ----
     def _norm(s): return None if pd.isna(s) else str(s).strip()
     if not {'Product','Cost','Type'}.issubset(costs_df.columns):
         raise ValueError("Cost sheet must contain columns: Type, Product, Cost")
@@ -314,26 +331,42 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     costs2['Product_norm'] = costs2['Product'].apply(_norm).apply(_apply_product_aliases)
 
     bring_cols = ['Type_norm','Product_norm','Cost']
+    # Optional: F2F column
     f2f_col_name = None
     for cand in ['F2F or Online?', 'F2F or Online', 'F2F/Online']:
         if cand in costs2.columns:
             bring_cols.append(cand)
             f2f_col_name = cand
             break
+    # Optional: Events or Marketing column (allow a few name variants)
+    evmk_col_name = None
+    for cand in ['Events or Marketing','Events/Marketing','Event or Marketing','Event/Marketing']:
+        if cand in costs2.columns:
+            bring_cols.append(cand)
+            evmk_col_name = cand
+            break
+
     costs2 = costs2[bring_cols].drop_duplicates(subset=['Type_norm','Product_norm'], keep='first')
 
     out['Type_norm'] = out['Type'].apply(_norm)
     out['Product_norm'] = out['Product'].apply(_norm).apply(_apply_product_aliases)
     out = out.merge(costs2, on=['Type_norm','Product_norm'], how='left').drop(columns=['Type_norm','Product_norm'])
 
-    # Final columns (keep _ridx so we can generate 1 template per submission row)
-    final_cols_internal = ['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost']
+    # Rename optional columns to standard names in the clean output
     if f2f_col_name:
         out = out.rename(columns={f2f_col_name: 'F2F or Online?'})
-        final_cols_internal += ['F2F or Online?']
-    final_cols_internal += ['_note_q1','_note_q2']
-    out = out[final_cols_internal].sort_values(['_ridx','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
+    if evmk_col_name:
+        out = out.rename(columns={evmk_col_name: 'Events or Marketing'})
 
+    # Final columns (keep _ridx + Added Time; templates will ignore these extras)
+    final_cols_internal = ['_ridx'] + REPEATED_FIRST + ['Added Time'] + ['Type','Event Date (if applicable)','Product','Cost']
+    if 'F2F or Online?' in out.columns:
+        final_cols_internal += ['F2F or Online?']
+    if 'Events or Marketing' in out.columns:
+        final_cols_internal += ['Events or Marketing']
+    final_cols_internal += ['_note_q1','_note_q2']
+
+    out = out[final_cols_internal].sort_values(['_ridx','Type','Event Date (if applicable)','Product']).reset_index(drop=True)
     return out
 
 # ===========================
@@ -581,7 +614,7 @@ def _populate_template_bytes(template_bytes: bytes, cleaned: pd.DataFrame, costs
             notes_ws["B2"].alignment = Alignment(wrap_text=False, vertical="top")
             notes_ws["B3"].alignment = Alignment(wrap_text=False, vertical="top")
 
-            # ===== SAVE FILE: Provider - Contact - WISHLIST.xlsx (no numbers) =====
+            # Save file
             out_bytes = BytesIO()
             wb.save(out_bytes); out_bytes.seek(0)
             safe_provider = re.sub(r'[^A-Za-z0-9 _.-]+', '_', prov or "Unknown_Provider")
@@ -657,11 +690,11 @@ if st.button("Submit", key="submit_wishlist"):
 
             missing_costs = cleaned_to_export['Cost'].isna().sum()
             if missing_costs > 0:
-                st.warning(f"{missing_costs} row(s) have no Cost match by (Type, Product). Ensure both exist in the MOF Cost Sheet.")
+                st.warning("Some rows have no Cost match by (Type, Product). Check the MOF Cost Sheet (including 'Events or Marketing').")
                 with st.expander("Preview rows missing Cost"):
                     st.dataframe(
                         cleaned_to_export[cleaned_to_export['Cost'].isna()][
-                            ['_ridx','Provider Name','Name','Type','Event Date (if applicable)','Product']
+                            ['_ridx','Provider Name','Name','Added Time','Type','Event Date (if applicable)','Product','Events or Marketing' if 'Events or Marketing' in cleaned_to_export.columns else 'Product']
                         ].head(500)
                     )
 
