@@ -1,3 +1,4 @@
+
 # streamlit_app.py
 import streamlit as st
 import pandas as pd
@@ -40,49 +41,6 @@ if uploaded_file:
 
     df = load_csv(uploaded_file)
 
-    # --- Robust date normalization (UK dd/mm/yyyy) ---
-    date_cols = [
-        "Application Date",
-        "Effective Date",
-        "Benefit End Date",
-        "Created Date",
-        "Last Updated",
-        "Earliest Version Date",
-        "Older Version Date",
-    ]
-
-    def format_dates_uk(s: pd.Series) -> pd.Series:
-        # Keep original so we can preserve blanks
-        orig = s.copy()
-
-        # Try parsing common string dates (dd/mm/yyyy, yyyy-mm-dd, with/without time)
-        parsed = pd.to_datetime(
-            s, errors="coerce", dayfirst=True, infer_datetime_format=True, utc=False
-        )
-
-        # Handle Excel serial numbers (e.g., 45231) where parse failed
-        num = pd.to_numeric(s, errors="coerce")
-        serial_mask = parsed.isna() & num.notna()
-        if serial_mask.any():
-            parsed.loc[serial_mask] = pd.to_datetime("1899-12-30") + pd.to_timedelta(
-                num[serial_mask], unit="D"
-            )
-
-        # Format as dd/mm/yyyy where we have a valid datetime
-        out = parsed.dt.strftime("%d/%m/%Y")
-
-        # Preserve blanks: if original is NaN/empty/whitespace, keep empty string
-        is_blank = orig.isna() | (orig.astype(str).str.strip() == "")
-        out = out.where(~is_blank, "")
-
-        return out
-
-    # Apply date formatting only to columns that exist
-    for col in date_cols:
-        if col in df.columns:
-            df[col] = format_dates_uk(df[col])
-
-    # --- Boolean cleanup (unchanged) ---
     bool_cols = [
         "High Risk", "Whole Of Life", "In Trust", "BTL", "Adverse",
         "Self Cert", "Off Panel", "Introduced?", "Been Checked?",
@@ -101,11 +59,9 @@ if uploaded_file:
     status = st.empty()
 
     cols_to_do = [c for c in bool_cols if c in df.columns]
-    # +1 for date formatting +1 for CSV generation
-    total_steps = len(cols_to_do) + 2
+    total_steps = len(cols_to_do) + 1
     step = 0
 
-    # Boolean transformation
     for col in cols_to_do:
         df[col] = df[col].apply(transform_bool)
         step += 1
@@ -113,7 +69,7 @@ if uploaded_file:
         status.text(f"Transforming “{col}” — ≈ {total_steps-step}s remaining")
 
     status.text("Generating cleaned CSV…")
-    # UTF-8 BOM to preserve £ and other symbols
+    # utf-8-sig to preserve £ etc.
     csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
     step += 1
     prog.progress(step / total_steps)
