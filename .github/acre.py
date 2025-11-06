@@ -40,6 +40,22 @@ if uploaded_file:
 
     df = load_csv(uploaded_file)
 
+    # Columns to format as short date dd/mm/yyyy
+    date_cols = [
+        "Application Date",
+        "Effective Date",
+        "Benefit End Date",
+        "Created Date",
+        "Last Updated",
+        "Earliest Version Date",
+        "Older Version Date"
+    ]
+
+    # Convert to datetime and format as dd/mm/yyyy text
+    for col in date_cols:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%d/%m/%Y")
+
     bool_cols = [
         "High Risk", "Whole Of Life", "In Trust", "BTL", "Adverse",
         "Self Cert", "Off Panel", "Introduced?", "Been Checked?",
@@ -58,9 +74,10 @@ if uploaded_file:
     status = st.empty()
 
     cols_to_do = [c for c in bool_cols if c in df.columns]
-    total_steps = len(cols_to_do) + 1
+    total_steps = len(cols_to_do) + 2  # include extra step for date formatting
     step = 0
 
+    # Boolean transformation
     for col in cols_to_do:
         df[col] = df[col].apply(transform_bool)
         step += 1
@@ -68,7 +85,8 @@ if uploaded_file:
         status.text(f"Transforming “{col}” — ≈ {total_steps-step}s remaining")
 
     status.text("Generating cleaned CSV…")
-    # utf-8-sig to preserve £ etc.
+
+    # Export with UTF-8-SIG to preserve £ etc.
     csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
     step += 1
     prog.progress(step / total_steps)
