@@ -40,36 +40,16 @@ if uploaded_file:
 
     df = load_csv(uploaded_file)
 
-    # --- Date Columns to Normalise as dd/mm/yyyy ---
-    date_cols = [
-        "Application Date",
-        "Effective Date",
-        "Benefit End Date",
-        "Created Date",
-        "Last Updated",
-        "Earliest Version Date",
-        "Older Version Date",
-    ]
+    # ---- Sort by Application Date (ascending) ----
+    if "Application Date" in df.columns:
+        # Try to parse dates safely (handles both dd/mm/yyyy and yyyy-mm-dd)
+        parsed_dates = pd.to_datetime(df["Application Date"], errors="coerce", dayfirst=True)
+        # Add parsed column temporarily for sorting
+        df["__parsed_app_date__"] = parsed_dates
+        # Sort ascending by Application Date (non-blanks first)
+        df = df.sort_values(by="__parsed_app_date__", ascending=True, na_position="last").drop(columns="__parsed_app_date__")
 
-    def clean_date_series(series):
-        """Convert mixed date strings to dd/mm/yyyy, preserving blanks."""
-        s = series.copy()
-        s = s.astype(str).str.strip()
-        s = s.replace({"nan": "", "None": "", "NaT": ""})
-
-        # Parse valid dates (handles with or without time)
-        parsed = pd.to_datetime(s, errors="coerce", dayfirst=True, infer_datetime_format=True)
-
-        # Keep original where parse failed
-        formatted = parsed.dt.strftime("%d/%m/%Y")
-        formatted = formatted.where(~parsed.isna(), s)
-        return formatted
-
-    for col in date_cols:
-        if col in df.columns:
-            df[col] = clean_date_series(df[col])
-
-    # --- Boolean cleanup (unchanged) ---
+    # ---- Boolean transformation (unchanged) ----
     bool_cols = [
         "High Risk", "Whole Of Life", "In Trust", "BTL", "Adverse",
         "Self Cert", "Off Panel", "Introduced?", "Been Checked?",
@@ -88,7 +68,7 @@ if uploaded_file:
     status = st.empty()
 
     cols_to_do = [c for c in bool_cols if c in df.columns]
-    total_steps = len(cols_to_do) + 2
+    total_steps = len(cols_to_do) + 1
     step = 0
 
     for col in cols_to_do:
@@ -98,6 +78,8 @@ if uploaded_file:
         status.text(f"Transforming “{col}” — ≈ {total_steps-step}s remaining")
 
     status.text("Generating cleaned CSV…")
+
+    # utf-8-sig to preserve £ etc.
     csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
 
     step += 1
