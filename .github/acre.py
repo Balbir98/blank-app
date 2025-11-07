@@ -1,4 +1,3 @@
-# streamlit_app.py
 import streamlit as st
 import pandas as pd
 import io
@@ -40,39 +39,63 @@ if uploaded_file:
 
     df = load_csv(uploaded_file)
 
-    # --- Application Date -> text "dd/MM/yyyy" (others untouched) ---
-    FORCE_TEXT_WITH_FORMULA_WRAPPER = True  # set to False to output plain "dd/MM/yyyy" text without ="" trick
-
+    # --- Application Date: convert to text (dd/MM/yyyy) ---
     if "Application Date" in df.columns:
         s = df["Application Date"].astype(str).str.strip()
 
-        # Treat placeholder strings as blanks
+        # Treat placeholders as blanks
         placeholders = s.str.lower().isin({"nan", "none", "null"})
         s = s.mask(placeholders, "")
 
-        # Parse UK first (handles dd/mm/yyyy and any time part if present)
+        # 1) Parse UK (dd/mm/yyyy hh:mm[:ss])
         parsed = pd.to_datetime(s, errors="coerce", dayfirst=True)
 
-        # For still-NaT rows that look ISO, try strict ISO yyyy-mm-dd
+        # 2) Parse ISO (yyyy-mm-dd hh:mm[:ss])
         need_iso = parsed.isna() & s.str.contains("-", na=False)
         if need_iso.any():
-            parsed.loc[need_iso] = pd.to_datetime(
-                s[need_iso], errors="coerce", format="%Y-%m-%d"
-            )
+            parsed.loc[need_iso] = pd.to_datetime(s[need_iso], errors="coerce")
 
-        # Format to dd/MM/yyyy; keep blank where unparseable
-        as_text = parsed.dt.strftime("%d/%m/%Y")
-        as_text = as_text.where(parsed.notna(), "")
+        # 3) Parse Excel serials (e.g. 45231)
+        still_nat = parsed.isna() & s.ne("")
+        if still_nat.any():
+            nums = pd.to_numeric(s[still_nat].str.replace(",", ""), errors="coerce")
+            has_num = nums.notna()
+            if has_num.any():
+                parsed.loc[still_nat[still_nat].index[has_num]] = (
+                    pd.to_datetime("1899-12-30") + pd.to_timedelta(nums[has_num], unit="D")
+                )
 
-        if FORCE_TEXT_WITH_FORMULA_WRAPPER:
-            # Display as 01/01/2025 but force text in Excel/Zoho by using ="01/01/2025"
-            df["Application Date"] = as_text.where(
-                as_text.eq(""),
-                '="' + as_text + '"'
-            )
-        else:
-            # Plain text dd/MM/yyyy (may still be parsed by some tools)
-            df["Application Date"] = as_text
+        # Format to dd/MM/yyyy; keep blanks as blanks
+        formatted = parsed.dt.strftime("%d/%m/%Y")
+        formatted = formatted.where(parsed.notna(), s)
+
+        # Convert to text explicitly so Zoho doesn’t reinterpret
+        df["Application Date"] = formatted.astype(str)
+
+    # --- Other date columns: keep same normalisation (dd/mm/yyyy) ---
+    date_cols = [
+        "Effective Date",
+        "Benefit End Date",
+        "Created Date",
+        "Last Updated",
+        "Earliest Version Date",
+        "Older Version Date",
+    ]
+
+    def clean_date_series(series):
+        """Convert mixed date strings to dd/mm/yyyy, preserving blanks."""
+        s = series.copy()
+        s = s.astype(str).str.strip()
+        s = s.replace({"nan": "", "None": "", "NaT": ""})
+
+        parsed = pd.to_datetime(s, errors="coerce", dayfirst=True, infer_datetime_format=True)
+        formatted = parsed.dt.strftime("%d/%m/%Y")
+        formatted = formatted.where(~parsed.isna(), s)
+        return formatted
+
+    for col in date_cols:
+        if col in df.columns:
+            df[col] = clean_date_series(df[col])
 
     # --- Boolean cleanup (unchanged) ---
     bool_cols = [
@@ -104,7 +127,6 @@ if uploaded_file:
 
     status.text("Generating cleaned CSV…")
 
-    # UTF-8 with BOM to preserve £ in headers/data
     csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
 
     step += 1
@@ -120,4 +142,3 @@ if uploaded_file:
 
 else:
     st.info("Please upload a CSV file to get started.")
-#lool#
