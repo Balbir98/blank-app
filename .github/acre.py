@@ -40,46 +40,39 @@ if uploaded_file:
 
     df = load_csv(uploaded_file)
 
-    # --- Date Columns to normalise as dd/MM/yyyy ---
-    date_cols = [
-        "Application Date",
-        "Effective Date",
-        "Benefit End Date",
-        "Created Date",
-        "Last Updated",
-        "Earliest Version Date",
-        "Older Version Date",
-    ]
+    # --- Application Date -> text "dd/MM/yyyy" (others untouched) ---
+    FORCE_TEXT_WITH_FORMULA_WRAPPER = True  # set to False to output plain "dd/MM/yyyy" text without ="" trick
 
-    def clean_date_series(series: pd.Series) -> pd.Series:
-        """
-        Convert mixed date strings to dd/MM/yyyy, preserving blanks.
-        Handles dd/mm/yyyy (with/without time) and yyyy-mm-dd.
-        """
-        s = series.astype(str).str.strip()
+    if "Application Date" in df.columns:
+        s = df["Application Date"].astype(str).str.strip()
 
-        # Treat text placeholders as blanks
-        placeholder = s.str.lower().isin({"nan", "none", "null"})
-        s = s.mask(placeholder, "")
+        # Treat placeholder strings as blanks
+        placeholders = s.str.lower().isin({"nan", "none", "null"})
+        s = s.mask(placeholders, "")
 
-        # 1) Try UK parse first (dd/mm/yyyy [hh:mm:ss])
+        # Parse UK first (handles dd/mm/yyyy and any time part if present)
         parsed = pd.to_datetime(s, errors="coerce", dayfirst=True)
 
-        # 2) For remaining NaT, try ISO yyyy-mm-dd
+        # For still-NaT rows that look ISO, try strict ISO yyyy-mm-dd
         need_iso = parsed.isna() & s.str.contains("-", na=False)
         if need_iso.any():
             parsed.loc[need_iso] = pd.to_datetime(
                 s[need_iso], errors="coerce", format="%Y-%m-%d"
             )
 
-        # Format to dd/MM/yyyy; keep original where still NaT
-        out = parsed.dt.strftime("%d/%m/%Y")
-        out = out.where(parsed.notna(), s)
-        return out
+        # Format to dd/MM/yyyy; keep blank where unparseable
+        as_text = parsed.dt.strftime("%d/%m/%Y")
+        as_text = as_text.where(parsed.notna(), "")
 
-    for col in date_cols:
-        if col in df.columns:
-            df[col] = clean_date_series(df[col])
+        if FORCE_TEXT_WITH_FORMULA_WRAPPER:
+            # Display as 01/01/2025 but force text in Excel/Zoho by using ="01/01/2025"
+            df["Application Date"] = as_text.where(
+                as_text.eq(""),
+                '="' + as_text + '"'
+            )
+        else:
+            # Plain text dd/MM/yyyy (may still be parsed by some tools)
+            df["Application Date"] = as_text
 
     # --- Boolean cleanup (unchanged) ---
     bool_cols = [
@@ -100,7 +93,7 @@ if uploaded_file:
     status = st.empty()
 
     cols_to_do = [c for c in bool_cols if c in df.columns]
-    total_steps = len(cols_to_do) + 2
+    total_steps = len(cols_to_do) + 1
     step = 0
 
     for col in cols_to_do:
@@ -110,6 +103,8 @@ if uploaded_file:
         status.text(f"Transforming “{col}” — ≈ {total_steps-step}s remaining")
 
     status.text("Generating cleaned CSV…")
+
+    # UTF-8 with BOM to preserve £ in headers/data
     csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
 
     step += 1
