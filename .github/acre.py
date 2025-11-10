@@ -12,14 +12,14 @@ if uploaded_file:
 
     @st.cache_data
     def load_csv(file):
-        # force these ID columns to stay exact
+        # Force these ID columns to stay exact
         dtype_map = {"Adviser ID": str, "Firm ID": str}
 
-        # Try the default UTF-8/c-engine with our dtype map
+        # Try UTF-8 first
         try:
             return pd.read_csv(file, dtype=dtype_map)
         except Exception:
-            # Fallback: raw bytes → text (utf-8 or latin-1) → sniff delimiter
+            # Fallback for different encodings
             file.seek(0)
             raw_bytes = file.read()
             try:
@@ -29,7 +29,6 @@ if uploaded_file:
 
             dialect = csv.Sniffer().sniff(raw_text[:10_000])
             sep = dialect.delimiter
-
             return pd.read_csv(
                 io.StringIO(raw_text),
                 sep=sep,
@@ -39,7 +38,7 @@ if uploaded_file:
 
     df = load_csv(uploaded_file)
 
-    # --- Date columns to output as TEXT "dd/MM/yyyy" ---
+    # --- Date columns to output as TEXT dd/MM/yyyy ---
     date_cols = [
         "Application Date",
         "Effective Date",
@@ -52,28 +51,27 @@ if uploaded_file:
 
     def normalize_date_to_text_ddmmyyyy(series: pd.Series) -> pd.Series:
         """
-        Return TEXT dd/MM/yyyy.
-        Handles dd/mm/yyyy (± time), yyyy-mm-dd (± time), and Excel serials.
-        Leaves blanks as blanks. Keeps unparseable values as-is.
+        Convert to TEXT dd/MM/yyyy.
+        Handles dd/mm/yyyy (± time), yyyy-mm-dd (± time), Excel serials.
+        Leaves blanks as blanks and keeps unparseable as-is.
         """
         s = series.astype(str).str.strip()
 
-        # Treat explicit placeholders as blanks
+        # Handle placeholders like nan, none, null
         placeholders = s.str.lower().isin({"nan", "none", "null", "nat"})
         s = s.mask(placeholders, "")
 
-        # 1) Parse UK (dd/mm/yyyy [hh:mm[:ss]])
+        # 1) UK format parse (dayfirst)
         parsed = pd.to_datetime(s, errors="coerce", dayfirst=True)
 
-        # 2) Parse ISO (yyyy-mm-dd [hh:mm[:ss]]) where still NaT and looks dashy
+        # 2) ISO parse (yyyy-mm-dd [hh:mm[:ss]])
         need_iso = parsed.isna() & s.str.contains("-", na=False)
         if need_iso.any():
             parsed.loc[need_iso] = pd.to_datetime(s[need_iso], errors="coerce")
 
-        # 3) Parse Excel serials (e.g., 45231 or 45231.0)
+        # 3) Excel serials (45231 etc)
         still_nat = parsed.isna() & s.ne("")
         if still_nat.any():
-            # remove thousands separators if any
             nums = pd.to_numeric(s[still_nat].str.replace(",", ""), errors="coerce")
             has_num = nums.notna()
             if has_num.any():
@@ -81,17 +79,26 @@ if uploaded_file:
                     pd.to_datetime("1899-12-30") + pd.to_timedelta(nums[has_num], unit="D")
                 )
 
-        # Format to dd/MM/yyyy where parsed; blanks stay blank; keep originals where still NaT
+        # Format dd/MM/yyyy, ensure leading zeros
         out = parsed.dt.strftime("%d/%m/%Y")
-        out = out.where(parsed.notna(), s)  # if still NaT, keep original text (including "")
 
-        # Ensure TEXT (not date) in the CSV
+        # Keep blanks and unparseable originals
+        out = out.where(parsed.notna(), s)
+
+        # Ensure text (string type)
         return out.astype(str)
 
-    # Apply to all listed date columns that exist
+    # Apply to all existing date columns
     for col in date_cols:
         if col in df.columns:
             df[col] = normalize_date_to_text_ddmmyyyy(df[col])
+
+    # --- Sort by Application Date ascending (blanks last) ---
+    if "Application Date" in df.columns:
+        parsed_app = pd.to_datetime(df["Application Date"], errors="coerce", dayfirst=True)
+        df["__app_sort__"] = parsed_app
+        df = df.sort_values(by="__app_sort__", ascending=True, na_position="last")
+        df = df.drop(columns="__app_sort__")
 
     # --- Boolean cleanup (unchanged) ---
     bool_cols = [
@@ -123,7 +130,7 @@ if uploaded_file:
 
     status.text("Generating cleaned CSV…")
 
-    # UTF-8 with BOM to preserve £ and other symbols reliably
+    # Export with UTF-8 BOM to preserve £ and other symbols
     csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
 
     step += 1
