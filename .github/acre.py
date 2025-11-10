@@ -39,41 +39,9 @@ if uploaded_file:
 
     df = load_csv(uploaded_file)
 
-    # --- Application Date: convert to text (dd/MM/yyyy) ---
-    if "Application Date" in df.columns:
-        s = df["Application Date"].astype(str).str.strip()
-
-        # Treat placeholders as blanks
-        placeholders = s.str.lower().isin({"nan", "none", "null"})
-        s = s.mask(placeholders, "")
-
-        # 1) Parse UK (dd/mm/yyyy hh:mm[:ss])
-        parsed = pd.to_datetime(s, errors="coerce", dayfirst=True)
-
-        # 2) Parse ISO (yyyy-mm-dd hh:mm[:ss])
-        need_iso = parsed.isna() & s.str.contains("-", na=False)
-        if need_iso.any():
-            parsed.loc[need_iso] = pd.to_datetime(s[need_iso], errors="coerce")
-
-        # 3) Parse Excel serials (e.g. 45231)
-        still_nat = parsed.isna() & s.ne("")
-        if still_nat.any():
-            nums = pd.to_numeric(s[still_nat].str.replace(",", ""), errors="coerce")
-            has_num = nums.notna()
-            if has_num.any():
-                parsed.loc[still_nat[still_nat].index[has_num]] = (
-                    pd.to_datetime("1899-12-30") + pd.to_timedelta(nums[has_num], unit="D")
-                )
-
-        # Format to dd/MM/yyyy; keep blanks as blanks
-        formatted = parsed.dt.strftime("%d/%m/%Y")
-        formatted = formatted.where(parsed.notna(), s)
-
-        # Convert to text explicitly so Zoho doesn’t reinterpret
-        df["Application Date"] = formatted.astype(str)
-
-    # --- Other date columns: keep same normalisation (dd/mm/yyyy) ---
+    # --- Date columns to output as TEXT "dd/MM/yyyy" ---
     date_cols = [
+        "Application Date",
         "Effective Date",
         "Benefit End Date",
         "Created Date",
@@ -82,20 +50,48 @@ if uploaded_file:
         "Older Version Date",
     ]
 
-    def clean_date_series(series):
-        """Convert mixed date strings to dd/mm/yyyy, preserving blanks."""
-        s = series.copy()
-        s = s.astype(str).str.strip()
-        s = s.replace({"nan": "", "None": "", "NaT": ""})
+    def normalize_date_to_text_ddmmyyyy(series: pd.Series) -> pd.Series:
+        """
+        Return TEXT dd/MM/yyyy.
+        Handles dd/mm/yyyy (± time), yyyy-mm-dd (± time), and Excel serials.
+        Leaves blanks as blanks. Keeps unparseable values as-is.
+        """
+        s = series.astype(str).str.strip()
 
-        parsed = pd.to_datetime(s, errors="coerce", dayfirst=True, infer_datetime_format=True)
-        formatted = parsed.dt.strftime("%d/%m/%Y")
-        formatted = formatted.where(~parsed.isna(), s)
-        return formatted
+        # Treat explicit placeholders as blanks
+        placeholders = s.str.lower().isin({"nan", "none", "null", "nat"})
+        s = s.mask(placeholders, "")
 
+        # 1) Parse UK (dd/mm/yyyy [hh:mm[:ss]])
+        parsed = pd.to_datetime(s, errors="coerce", dayfirst=True)
+
+        # 2) Parse ISO (yyyy-mm-dd [hh:mm[:ss]]) where still NaT and looks dashy
+        need_iso = parsed.isna() & s.str.contains("-", na=False)
+        if need_iso.any():
+            parsed.loc[need_iso] = pd.to_datetime(s[need_iso], errors="coerce")
+
+        # 3) Parse Excel serials (e.g., 45231 or 45231.0)
+        still_nat = parsed.isna() & s.ne("")
+        if still_nat.any():
+            # remove thousands separators if any
+            nums = pd.to_numeric(s[still_nat].str.replace(",", ""), errors="coerce")
+            has_num = nums.notna()
+            if has_num.any():
+                parsed.loc[still_nat[still_nat].index[has_num]] = (
+                    pd.to_datetime("1899-12-30") + pd.to_timedelta(nums[has_num], unit="D")
+                )
+
+        # Format to dd/MM/yyyy where parsed; blanks stay blank; keep originals where still NaT
+        out = parsed.dt.strftime("%d/%m/%Y")
+        out = out.where(parsed.notna(), s)  # if still NaT, keep original text (including "")
+
+        # Ensure TEXT (not date) in the CSV
+        return out.astype(str)
+
+    # Apply to all listed date columns that exist
     for col in date_cols:
         if col in df.columns:
-            df[col] = clean_date_series(df[col])
+            df[col] = normalize_date_to_text_ddmmyyyy(df[col])
 
     # --- Boolean cleanup (unchanged) ---
     bool_cols = [
@@ -127,6 +123,7 @@ if uploaded_file:
 
     status.text("Generating cleaned CSV…")
 
+    # UTF-8 with BOM to preserve £ and other symbols reliably
     csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
 
     step += 1
