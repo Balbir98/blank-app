@@ -173,6 +173,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     Includes:
       - Events or Marketing (from cost sheet) in clean output
       - Added Time from Zoho (dd/mm/yyyy) in clean output
+      - Regional Roadshow Products split on commas into separate rows
     """
     if form_df.shape[0] < 2:
         return pd.DataFrame(columns=['_ridx'] + REPEATED_FIRST + ['Type','Event Date (if applicable)','Product','Cost','F2F or Online?','Events or Marketing','Added Time'])
@@ -238,7 +239,7 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
                         })
                     continue
 
-            # Regional roadshow matrix
+            # Regional roadshow matrix (location subheader → Event Date; cell text → Product)
             if current_type and _is_rre_type(current_type) and sub is not None and _looks_like_location(str(sub)):
                 if _is_unchecked(text_val):
                     continue
@@ -287,6 +288,20 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
                     records.append({'_ridx': ridx, 'Type': current_type, 'Event Date (if applicable)': evt, 'Product': prod})
 
     out = pd.DataFrame.from_records(records)
+
+    # ===== NEW: split comma products specifically for Regional Roadshow =====
+    if not out.empty:
+        mask_rre_comma = out['Type'].apply(_is_rre_type) & out['Product'].astype(str).str.contains(',')
+        if mask_rre_comma.any():
+            base = out[~mask_rre_comma].copy()
+            rre_multi = out[mask_rre_comma]
+            new_rows = []
+            for _, r in rre_multi.iterrows():
+                for part in [p.strip() for p in str(r['Product']).split(',') if p.strip()]:
+                    nr = r.copy()
+                    nr['Product'] = part
+                    new_rows.append(nr)
+            out = pd.concat([base, pd.DataFrame(new_rows)], ignore_index=True)
 
     # Attach repeated fields (per original row)
     for c in REPEATED_FIRST:
