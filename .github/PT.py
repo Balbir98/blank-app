@@ -22,16 +22,12 @@ def norm_text(x: str) -> str:
 
 
 def yyyymm_to_month_year(val) -> str:
-    """
-    Convert YYYYMM (e.g., 202605) to 'May 2026'.
-    Accepts int/float/str.
-    """
+    """Convert YYYYMM (e.g., 202605) to 'May 2026'."""
     if pd.isna(val):
         return ""
-    s = str(val).strip()
-    s = s.replace(".0", "")
+    s = str(val).strip().replace(".0", "")
     if not re.fullmatch(r"\d{6}", s):
-        return s  # fallback: leave as-is
+        return s
     dt = datetime.strptime(s, "%Y%m")
     return dt.strftime("%B %Y")
 
@@ -44,9 +40,7 @@ def first_name(full_name: str) -> str:
 
 
 def build_email_body(broker_first_name: str, lender_name: str, month_lines: list[str]) -> str:
-    """
-    Plain-text body formatted to mimic your screenshots (short lines + spacing + bullets).
-    """
+    """Plain-text body formatted to mimic your screenshots."""
     lines = []
     lines.append(f"Hi {broker_first_name},")
     lines.append("")
@@ -61,7 +55,9 @@ def build_email_body(broker_first_name: str, lender_name: str, month_lines: list
     for ml in month_lines:
         lines.append(ml)
     lines.append("")
-    lines.append(f"All you need to do is call your {lender_name} Business Development Manager for them to confirm the client name(s).")
+    lines.append(
+        f"All you need to do is call your {lender_name} Business Development Manager for them to confirm the client name(s)."
+    )
     lines.append("")
     lines.append(
         "I wanted to share this data with you, so you can plan your customer conversations with plenty of time, "
@@ -100,22 +96,46 @@ def make_eml(to_email: str, subject: str, body: str) -> bytes:
     return msg.encode("utf-8")
 
 
+def read_any(file) -> pd.DataFrame:
+    name = (file.name or "").lower()
+    if name.endswith(".csv"):
+        return pd.read_csv(file)
+    return pd.read_excel(file)
+
+
+# ----------------------------
+# Lender-specific configuration
+# ----------------------------
+LENDER_CONFIG = {
+    "Santander": {
+        "lender_required_cols": ["Broker Name", "Firm", "Maturity Month", "Volume"],
+        "subject": "Santander upcoming product transfers",
+        # in case Santander wording should be different in the body later
+        "display_name": "Santander",
+    },
+    # Add more lenders later:
+    # "Halifax": {...},
+}
+
+
 # ----------------------------
 # Streamlit UI
 # ----------------------------
 st.set_page_config(page_title="PT Communications – Email Draft Generator", layout="wide")
 st.title("PT Communications – Product Transfer Email Draft Generator")
 
-st.write(
-    "Upload the lender maturity dataset (e.g., Santander PT volumes by broker), then upload Zoho data "
-    "(Adviser Name + Firm + Email). The app generates one email **draft** per broker and exports a ZIP of `.eml` files. "
-    "**Nothing is sent automatically.**"
-)
+st.caption("This app generates **draft .eml files only**. It does **not** send emails.")
+
+lender_name = st.selectbox("Step 1 — Select Lender", list(LENDER_CONFIG.keys()))
+
+st.divider()
+
+st.subheader(f"Step 2 — Upload files for {lender_name}")
 
 col1, col2 = st.columns(2)
 with col1:
     lender_file = st.file_uploader(
-        "Upload Lender Data (e.g., Santander template)",
+        f"Upload {lender_name} Lender Data",
         type=["csv", "xlsx", "xls"],
         accept_multiple_files=False,
     )
@@ -126,19 +146,11 @@ with col2:
         accept_multiple_files=False,
     )
 
-lender_name = st.selectbox("Select Lender", ["Santander"])
-
 st.divider()
 
-
-def read_any(file) -> pd.DataFrame:
-    name = (file.name or "").lower()
-    if name.endswith(".csv"):
-        return pd.read_csv(file)
-    return pd.read_excel(file)
-
-
 if lender_file and zoho_file:
+    config = LENDER_CONFIG[lender_name]
+
     # ----------------------------
     # Load files
     # ----------------------------
@@ -152,14 +164,16 @@ if lender_file and zoho_file:
     # ----------------------------
     # Validate columns
     # ----------------------------
-    lender_required = ["Broker Name", "Firm", "Maturity Month", "Volume"]
-    zoho_required = ["AR Active Adviser Name", "AR Firm Name", "Email"]
+    lender_required = config["lender_required_cols"]
+
+    # New Zoho headers you gave:
+    zoho_required = ["Full Name", "AR Firm Name", "Email (AR Active advisers)"]
 
     missing_lender = [c for c in lender_required if c not in df_lender.columns]
     missing_zoho = [c for c in zoho_required if c not in df_zoho.columns]
 
     if missing_lender:
-        st.error(f"Lender data missing columns: {missing_lender}")
+        st.error(f"{lender_name} lender data missing columns: {missing_lender}")
         st.stop()
     if missing_zoho:
         st.error(f"Zoho data missing columns: {missing_zoho}")
@@ -174,16 +188,16 @@ if lender_file and zoho_file:
     df_lender["__broker_key"] = df_lender["Broker Name"].map(norm_text)
     df_lender["__firm_key"] = df_lender["Firm"].map(norm_text)
 
-    df_zoho["__broker_key"] = df_zoho["AR Active Adviser Name"].map(norm_text)
+    df_zoho["__broker_key"] = df_zoho["Full Name"].map(norm_text)
     df_zoho["__firm_key"] = df_zoho["AR Firm Name"].map(norm_text)
 
-    df_zoho["Email"] = df_zoho["Email"].astype(str).str.strip()
-    df_zoho = df_zoho[df_zoho["Email"].str.contains(r"@", na=False)].copy()
+    # Standardize email column name
+    df_zoho["__email"] = df_zoho["Email (AR Active advisers)"].astype(str).str.strip()
+    df_zoho = df_zoho[df_zoho["__email"].str.contains(r"@", na=False)].copy()
 
-    # Lookup: (broker_key, firm_key) -> email
     email_lookup = (
         df_zoho.drop_duplicates(subset=["__broker_key", "__firm_key"])
-        .set_index(["__broker_key", "__firm_key"])["Email"]
+        .set_index(["__broker_key", "__firm_key"])["__email"]
         .to_dict()
     )
 
@@ -201,7 +215,6 @@ if lender_file and zoho_file:
         .reset_index()
     )
 
-    # Sort months
     def month_sort_key(x):
         try:
             s = str(x).strip().replace(".0", "")
@@ -217,7 +230,8 @@ if lender_file and zoho_file:
     # ----------------------------
     # Generate drafts
     # ----------------------------
-    subject = f"{lender_name} upcoming product transfers"
+    subject = config["subject"]
+    lender_display = config.get("display_name", lender_name)
 
     zip_buffer = io.BytesIO()
     manifest_rows = []
@@ -225,12 +239,10 @@ if lender_file and zoho_file:
 
     with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for (broker_name, firm, broker_key, firm_key), sub in broker_groups:
-            # If lookup fails: leave To blank (still generate draft)
             to_email = email_lookup.get((broker_key, firm_key), "")
             if not to_email:
                 unmatched_rows.append({"Broker Name": broker_name, "Firm": firm})
 
-            # Build month lines like: "2 in May 2026"
             month_lines = []
             for _, r in sub.iterrows():
                 vol = int(r["Volume"])
@@ -239,13 +251,13 @@ if lender_file and zoho_file:
                 month_label = yyyymm_to_month_year(r["Maturity Month"])
                 month_lines.append(f"{vol} in {month_label}")
 
-            # If there are no positive volumes, skip draft
+            # Skip if nothing to say
             if not month_lines:
                 continue
 
             body = build_email_body(
                 broker_first_name=first_name(broker_name),
-                lender_name=lender_name,
+                lender_name=lender_display,
                 month_lines=month_lines,
             )
             eml_bytes = make_eml(to_email=to_email, subject=subject, body=body)
@@ -277,6 +289,7 @@ if lender_file and zoho_file:
     with left:
         st.subheader("Drafts created")
         st.write(f"Created **{len(manifest_rows)}** email draft(s). (Drafts only — nothing is sent.)")
+
         if manifest_rows:
             st.dataframe(pd.DataFrame(manifest_rows), use_container_width=True)
 
@@ -295,8 +308,7 @@ if lender_file and zoho_file:
                 "Drafts were still created with an empty To: field."
             )
             st.dataframe(pd.DataFrame(unmatched_rows).drop_duplicates(), use_container_width=True)
-            st.caption("Tip: matching is case/space tolerant, but needs the same adviser + firm wording in both files.")
         else:
             st.success("All brokers matched to an email address.")
 else:
-    st.info("Upload both files to generate drafts.")
+    st.info("Select a lender and upload both files to generate drafts.")
