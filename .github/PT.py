@@ -12,7 +12,6 @@ import streamlit as st
 # Helpers
 # ----------------------------
 def norm_text(x: str) -> str:
-    """Normalize text for matching (case/space/punctuation tolerant)."""
     if pd.isna(x):
         return ""
     x = str(x).strip().lower()
@@ -22,7 +21,6 @@ def norm_text(x: str) -> str:
 
 
 def yyyymm_to_month_year(val) -> str:
-    """Convert YYYYMM (e.g., 202605) to 'May 2026'."""
     if pd.isna(val):
         return ""
     s = str(val).strip().replace(".0", "")
@@ -33,7 +31,6 @@ def yyyymm_to_month_year(val) -> str:
 
 
 def month_sort_key(val) -> int:
-    """Sort key for YYYYMM. Unknown formats go last."""
     if pd.isna(val):
         return 99999999
     s = str(val).strip().replace(".0", "")
@@ -54,17 +51,16 @@ def build_email_body_html(broker_first_name: str, lender_name: str, month_lines:
     HTML email body:
     - Segoe UI font
     - Month lines bold + red
-    - Specific sentence bold
+    - Key sentence bold
     - Objection lines (in quotes) bold; explanation lines normal
     """
-    # Month lines: bold + red
     month_html = "".join(
-        [f'<div style="font-weight:700; color:#C00000;">{ml}</div>' for ml in month_lines]
+        [f'<div style="font-weight:700; color:#C00000; margin:6px 0;">{ml}</div>' for ml in month_lines]
     )
 
     return f"""
 <html>
-  <body style="font-family: 'Segoe UI', SegoeUI, Arial, sans-serif; font-size: 11pt;">
+  <body style="font-family: 'Segoe UI', SegoeUI, Arial, sans-serif; font-size: 11pt; color: #111;">
     <p>Hi {broker_first_name},</p>
 
     <p>Hope you’re well?</p>
@@ -107,12 +103,9 @@ def build_email_body_html(broker_first_name: str, lender_name: str, month_lines:
 def make_eml_outlook_draft(to_email: str, subject: str, html_body: str) -> bytes:
     """
     Outlook-friendly unsent draft (.eml):
-    - X-Unsent: 1 => opens in compose mode (unsent draft)
-    - HTML body for formatting
-    NOTE: This does NOT send emails.
+    X-Unsent: 1 => opens in compose mode (unsent draft)
     """
     to_email = "" if to_email is None else str(to_email).strip()
-
     msg = (
         "X-Unsent: 1\n"
         f"To: {to_email}\n"
@@ -134,7 +127,7 @@ def read_any(file) -> pd.DataFrame:
 
 
 # ----------------------------
-# Lender config (easy to extend)
+# Lender config
 # ----------------------------
 LENDER_CONFIG = {
     "Santander": {
@@ -142,7 +135,6 @@ LENDER_CONFIG = {
         "subject": "Santander upcoming product transfers",
         "display_name": "Santander",
     },
-    # Add future lenders here...
 }
 
 
@@ -161,7 +153,7 @@ st.subheader(f"Step 2 — Upload files for {lender_name}")
 col1, col2 = st.columns(2)
 with col1:
     lender_file = st.file_uploader(
-        f"Upload {lender_name} data",
+        f"Upload {lender_name} provider data",
         type=["csv", "xlsx", "xls"],
         accept_multiple_files=False,
     )
@@ -185,7 +177,7 @@ if lender_file and zoho_file:
         st.error(f"Error reading files: {e}")
         st.stop()
 
-    # Validate columns
+    # Validate columns (provider/lender file)
     lender_required = config["lender_required_cols"]
     zoho_required = ["Full Name", "AR Firm Name", "Email (AR Active advisers)"]
 
@@ -208,51 +200,72 @@ if lender_file and zoho_file:
 
     df_zoho["__broker_key"] = df_zoho["Full Name"].map(norm_text)
     df_zoho["__firm_key"] = df_zoho["AR Firm Name"].map(norm_text)
-
     df_zoho["__email"] = df_zoho["Email (AR Active advisers)"].astype(str).str.strip()
-    df_zoho = df_zoho[df_zoho["__email"].str.contains(r"@", na=False)].copy()
 
-    email_lookup = (
-        df_zoho.drop_duplicates(subset=["__broker_key", "__firm_key"])
+    # Clean Zoho to rows with valid email only (we still want broker-only lookup though)
+    df_zoho_valid = df_zoho[df_zoho["__email"].str.contains(r"@", na=False)].copy()
+
+    # Exact lookup dict: (broker_key, firm_key) -> email
+    email_lookup_exact = (
+        df_zoho_valid.drop_duplicates(subset=["__broker_key", "__firm_key"])
         .set_index(["__broker_key", "__firm_key"])["__email"]
         .to_dict()
     )
 
-    # Ensure numeric volume
+    # Broker-only fallback: broker_key -> first email found for that broker
+    broker_only_lookup = (
+        df_zoho_valid.drop_duplicates(subset=["__broker_key"])  # keep first per broker
+        .set_index(["__broker_key"])["__email"]
+        .to_dict()
+    )
+
+    # Total unique advisers in provider file (by Broker Name + Firm combination)
+    provider_unique_count = df_lender[["Broker Name", "Firm"]].drop_duplicates().shape[0]
+
+    # Ensure Volume numeric
     df_lender["Volume"] = pd.to_numeric(df_lender["Volume"], errors="coerce").fillna(0).astype(int)
 
-    # Aggregate per broker+firm+month (handles multiple rows correctly)
+    # Aggregate provider rows by broker+firm+month (keeps multiple months)
     grouped = (
         df_lender.groupby(
-            ["Broker Name", "Firm", "__broker_key", "__firm_key", "Maturity Month"],
+            ["__broker_key", "__firm_key", "Broker Name", "Firm", "Maturity Month"],
             dropna=False,
         )["Volume"]
         .sum()
         .reset_index()
     )
 
-    # Sort months chronologically
+    # Sort months
     grouped["__month_sort"] = grouped["Maturity Month"].map(month_sort_key)
-    grouped = grouped.sort_values(["Broker Name", "Firm", "__month_sort"], ascending=True)
+    grouped = grouped.sort_values(["__broker_key", "__firm_key", "__month_sort"], ascending=True)
 
-    broker_groups = grouped.groupby(["Broker Name", "Firm", "__broker_key", "__firm_key"], dropna=False)
+    # Build per-broker+firm groups
+    broker_groups = grouped.groupby(["__broker_key", "__firm_key", "Broker Name", "Firm"], dropna=False)
 
-    # Generate ZIP of drafts
+    # Prepare ZIP
     subject = config["subject"]
     lender_display = config.get("display_name", lender_name)
 
     zip_buffer = io.BytesIO()
+    manifest = []
+    unmatched_list = []
+
     created = 0
-    unmatched = 0
+    unmatched_count = 0
 
     with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for (broker_name, firm, broker_key, firm_key), sub in broker_groups:
-            # If lookup fails, To stays blank (still create the draft)
-            to_email = email_lookup.get((broker_key, firm_key), "")
+        for (broker_key, firm_key, broker_name, firm), sub in broker_groups:
+            # Try exact lookup (name + firm)
+            to_email = email_lookup_exact.get((broker_key, firm_key), "")
+            # Fallback to broker-only
             if not to_email:
-                unmatched += 1
+                to_email = broker_only_lookup.get(broker_key, "")
 
-            # Build ALL month lines for this broker
+            if not to_email:
+                unmatched_count += 1
+                unmatched_list.append({"Broker Name": broker_name, "Firm": firm})
+
+            # Build month lines for this broker+firm (ALL rows)
             month_lines = []
             for _, r in sub.iterrows():
                 vol = int(r["Volume"])
@@ -261,21 +274,18 @@ if lender_file and zoho_file:
                 month_label = yyyymm_to_month_year(r["Maturity Month"])
                 month_lines.append(f"{vol} in {month_label}")
 
-            # Skip if no positive volumes
+            # If no positive volumes, still count as present but skip draft
             if not month_lines:
                 continue
 
+            # make html body
             html_body = build_email_body_html(
                 broker_first_name=first_name(broker_name),
                 lender_name=lender_display,
                 month_lines=month_lines,
             )
 
-            eml_bytes = make_eml_outlook_draft(
-                to_email=to_email,
-                subject=subject,
-                html_body=html_body,
-            )
+            eml_bytes = make_eml_outlook_draft(to_email=to_email, subject=subject, html_body=html_body)
 
             safe_broker = re.sub(r"[^\w\s-]", "", str(broker_name)).strip().replace(" ", "_")
             safe_firm = re.sub(r"[^\w\s-]", "", str(firm)).strip().replace(" ", "_")
@@ -284,9 +294,33 @@ if lender_file and zoho_file:
             zf.writestr(filename, eml_bytes)
             created += 1
 
+            manifest.append(
+                {
+                    "Broker Name": broker_name,
+                    "Firm": firm,
+                    "Email (To)": to_email,
+                    "Draft File": filename,
+                    "Lines": "; ".join(month_lines),
+                }
+            )
+
     zip_buffer.seek(0)
 
-    st.success(f"Created {created} draft(s). ({unmatched} had no email match — To left blank.)")
+    # Show results & download
+    st.subheader("Summary")
+    st.markdown(
+        f"- Unique advisers (provider file): **{provider_unique_count}**  \n"
+        f"- Drafts created: **{created}**  \n"
+        f"- Advisers with no matched email (To left blank): **{unmatched_count}**"
+    )
+
+    if manifest:
+        st.subheader("Draft manifest")
+        st.dataframe(pd.DataFrame(manifest), use_container_width=True)
+
+    if unmatched_list:
+        st.subheader("Lookup misses (no email found)")
+        st.dataframe(pd.DataFrame(unmatched_list).drop_duplicates(), use_container_width=True)
 
     st.download_button(
         "Download ZIP of Outlook draft .eml files",
