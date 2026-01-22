@@ -12,6 +12,7 @@ import streamlit as st
 # Helpers
 # ----------------------------
 def norm_text(x: str) -> str:
+    """Normalize text for matching (case/space/punctuation tolerant)."""
     if pd.isna(x):
         return ""
     x = str(x).strip().lower()
@@ -21,6 +22,7 @@ def norm_text(x: str) -> str:
 
 
 def yyyymm_to_month_year(val) -> str:
+    """Convert YYYYMM (e.g., 202605) to 'May 2026'."""
     if pd.isna(val):
         return ""
     s = str(val).strip().replace(".0", "")
@@ -28,6 +30,16 @@ def yyyymm_to_month_year(val) -> str:
         return s
     dt = datetime.strptime(s, "%Y%m")
     return dt.strftime("%B %Y")
+
+
+def month_sort_key(val) -> int:
+    """Sort key for YYYYMM. Unknown formats go last."""
+    if pd.isna(val):
+        return 99999999
+    s = str(val).strip().replace(".0", "")
+    if re.fullmatch(r"\d{6}", s):
+        return int(s)
+    return 99999999
 
 
 def first_name(full_name: str) -> str:
@@ -38,20 +50,29 @@ def first_name(full_name: str) -> str:
 
 
 def build_email_body_html(broker_first_name: str, lender_name: str, month_lines: list[str]) -> str:
-    # HTML so Outlook renders spacing + bullets properly in compose mode
-    month_html = "".join([f"<div>{ml}</div>" for ml in month_lines])
+    """
+    HTML email body:
+    - Segoe UI font
+    - Month lines bold + red
+    - Specific sentence bold
+    - Objection lines (in quotes) bold; explanation lines normal
+    """
+    # Month lines: bold + red
+    month_html = "".join(
+        [f'<div style="font-weight:700; color:#C00000;">{ml}</div>' for ml in month_lines]
+    )
 
-    # keep wording exactly like your template
     return f"""
 <html>
-  <body style="font-family: Calibri, Arial, sans-serif; font-size: 11pt;">
+  <body style="font-family: 'Segoe UI', SegoeUI, Arial, sans-serif; font-size: 11pt;">
     <p>Hi {broker_first_name},</p>
 
     <p>Hope you’re well?</p>
 
     <p>
-      Great news - I’ve received some useful data from {lender_name} regarding your upcoming renewals; the following number of potential
-      product transfers are due with {lender_name} in the coming months and a new rate can now be secured:
+      Great news - I’ve received some useful data from {lender_name} regarding your upcoming renewals;
+      <strong>the following number of potential
+      product transfers are due with {lender_name} in the coming months and a new rate can now be secured:</strong>
     </p>
 
     <p>
@@ -85,13 +106,13 @@ def build_email_body_html(broker_first_name: str, lender_name: str, month_lines:
 
 def make_eml_outlook_draft(to_email: str, subject: str, html_body: str) -> bytes:
     """
-    Outlook-friendly .eml draft:
-    - X-Unsent: 1 makes Outlook open it in COMPOSE mode (unsent draft)
-    - HTML body for proper formatting
+    Outlook-friendly unsent draft (.eml):
+    - X-Unsent: 1 => opens in compose mode (unsent draft)
+    - HTML body for formatting
+    NOTE: This does NOT send emails.
     """
     to_email = "" if to_email is None else str(to_email).strip()
 
-    # Important: X-Unsent: 1 is the key
     msg = (
         "X-Unsent: 1\n"
         f"To: {to_email}\n"
@@ -113,7 +134,7 @@ def read_any(file) -> pd.DataFrame:
 
 
 # ----------------------------
-# Lender config
+# Lender config (easy to extend)
 # ----------------------------
 LENDER_CONFIG = {
     "Santander": {
@@ -121,6 +142,7 @@ LENDER_CONFIG = {
         "subject": "Santander upcoming product transfers",
         "display_name": "Santander",
     },
+    # Add future lenders here...
 }
 
 
@@ -129,7 +151,7 @@ LENDER_CONFIG = {
 # ----------------------------
 st.set_page_config(page_title="PT Communications – Draft Generator", layout="wide")
 st.title("PT Communications – Email Draft Generator")
-st.caption("Creates Outlook-friendly **draft files** in a ZIP. Nothing is sent automatically.")
+st.caption("Creates Outlook-friendly **unsent draft .eml files** in a ZIP. Nothing is sent automatically.")
 
 lender_name = st.selectbox("Step 1 — Select Provider", list(LENDER_CONFIG.keys()))
 st.divider()
@@ -163,7 +185,7 @@ if lender_file and zoho_file:
         st.error(f"Error reading files: {e}")
         st.stop()
 
-    # Validate
+    # Validate columns
     lender_required = config["lender_required_cols"]
     zoho_required = ["Full Name", "AR Firm Name", "Email (AR Active advisers)"]
 
@@ -177,7 +199,7 @@ if lender_file and zoho_file:
         st.error(f"Zoho file missing columns: {missing_zoho}")
         st.stop()
 
-    # Normalize keys
+    # Normalize keys for matching
     df_lender = df_lender.copy()
     df_zoho = df_zoho.copy()
 
@@ -196,28 +218,26 @@ if lender_file and zoho_file:
         .to_dict()
     )
 
-    # Aggregate volumes
+    # Ensure numeric volume
     df_lender["Volume"] = pd.to_numeric(df_lender["Volume"], errors="coerce").fillna(0).astype(int)
 
+    # Aggregate per broker+firm+month (handles multiple rows correctly)
     grouped = (
         df_lender.groupby(
             ["Broker Name", "Firm", "__broker_key", "__firm_key", "Maturity Month"],
-            dropna=False
+            dropna=False,
         )["Volume"]
         .sum()
         .reset_index()
     )
 
-    def month_sort_key(x):
-        s = str(x).strip().replace(".0", "")
-        return int(s) if re.fullmatch(r"\d{6}", s) else 99999999
-
+    # Sort months chronologically
     grouped["__month_sort"] = grouped["Maturity Month"].map(month_sort_key)
     grouped = grouped.sort_values(["Broker Name", "Firm", "__month_sort"], ascending=True)
 
     broker_groups = grouped.groupby(["Broker Name", "Firm", "__broker_key", "__firm_key"], dropna=False)
 
-    # Create ZIP of drafts
+    # Generate ZIP of drafts
     subject = config["subject"]
     lender_display = config.get("display_name", lender_name)
 
@@ -227,10 +247,12 @@ if lender_file and zoho_file:
 
     with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for (broker_name, firm, broker_key, firm_key), sub in broker_groups:
+            # If lookup fails, To stays blank (still create the draft)
             to_email = email_lookup.get((broker_key, firm_key), "")
             if not to_email:
                 unmatched += 1
 
+            # Build ALL month lines for this broker
             month_lines = []
             for _, r in sub.iterrows():
                 vol = int(r["Volume"])
@@ -239,6 +261,7 @@ if lender_file and zoho_file:
                 month_label = yyyymm_to_month_year(r["Maturity Month"])
                 month_lines.append(f"{vol} in {month_label}")
 
+            # Skip if no positive volumes
             if not month_lines:
                 continue
 
@@ -251,7 +274,7 @@ if lender_file and zoho_file:
             eml_bytes = make_eml_outlook_draft(
                 to_email=to_email,
                 subject=subject,
-                html_body=html_body
+                html_body=html_body,
             )
 
             safe_broker = re.sub(r"[^\w\s-]", "", str(broker_name)).strip().replace(" ", "_")
