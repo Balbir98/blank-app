@@ -14,7 +14,6 @@ if uploaded_file:
     def load_csv(file):
         # Force these ID columns to stay exact
         dtype_map = {"Adviser ID": str, "Firm ID": str}
-
         # Try UTF-8 first
         try:
             return pd.read_csv(file, dtype=dtype_map)
@@ -26,7 +25,6 @@ if uploaded_file:
                 raw_text = raw_bytes.decode("utf-8")
             except UnicodeDecodeError:
                 raw_text = raw_bytes.decode("latin-1")
-
             dialect = csv.Sniffer().sniff(raw_text[:10_000])
             sep = dialect.delimiter
             return pd.read_csv(
@@ -52,22 +50,39 @@ if uploaded_file:
     def normalize_date_to_text_ddmmyyyy(series: pd.Series) -> pd.Series:
         """
         Convert to TEXT dd/MM/yyyy.
-        Handles:
-          - dd/mm/yyyy (± time)
-          - yyyy-mm-dd (± time)
-          - Excel serials
-        Anything that still can't be parsed becomes BLANK.
+        Deterministic parsing:
+          1) ISO yyyy-mm-dd (and yyyy-mm-dd hh:mm:ss) parsed with explicit format (NO guessing)
+          2) UK dd/mm/yyyy (± time) parsed with dayfirst=True
+          3) Excel serial numbers
+        Leaves blanks as blanks; keeps unparseable as-is.
         """
         s = series.astype(str).str.strip()
 
-        # Treat placeholder strings as blanks
         placeholders = s.str.lower().isin({"nan", "none", "null", "nat"})
         s = s.mask(placeholders, "")
 
-        # 1) UK-style parse (dayfirst=True) – this will also happily parse ISO yyyy-mm-dd
-        parsed = pd.to_datetime(s, errors="coerce", dayfirst=True)
+        parsed = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
 
-        # 2) Excel serials (e.g. 45231) for anything still NaT but non-empty
+        # 1) ISO with time: YYYY-MM-DD HH:MM:SS
+        iso_dt_mask = s.str.match(r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}$", na=False)
+        if iso_dt_mask.any():
+            parsed.loc[iso_dt_mask] = pd.to_datetime(
+                s[iso_dt_mask], format="%Y-%m-%d %H:%M:%S", errors="coerce"
+            )
+
+        # 2) ISO date only: YYYY-MM-DD
+        iso_d_mask = s.str.match(r"^\d{4}-\d{2}-\d{2}$", na=False)
+        if iso_d_mask.any():
+            parsed.loc[iso_d_mask] = pd.to_datetime(
+                s[iso_d_mask], format="%Y-%m-%d", errors="coerce"
+            )
+
+        # 3) UK / anything else (dd/mm/yyyy, with or without time)
+        remaining = parsed.isna() & s.ne("")
+        if remaining.any():
+            parsed.loc[remaining] = pd.to_datetime(s[remaining], errors="coerce", dayfirst=True)
+
+        # 4) Excel serials for anything still NaT but non-empty
         still_nat = parsed.isna() & s.ne("")
         if still_nat.any():
             nums = pd.to_numeric(s[still_nat].str.replace(",", ""), errors="coerce")
@@ -77,14 +92,10 @@ if uploaded_file:
                     pd.to_datetime("1899-12-30") + pd.to_timedelta(nums[has_num], unit="D")
                 )
 
-        # Final: format only valid dates; everything else -> blank
         out = parsed.dt.strftime("%d/%m/%Y")
-        out = out.where(parsed.notna(), "")  # unparseable values become blank
-
-        # Ensure pure text in the CSV
+        out = out.where(parsed.notna(), s)  # keep original for truly unparseable like 0025-01-02
         return out.astype(str)
 
-    # Apply to all existing date columns
     for col in date_cols:
         if col in df.columns:
             df[col] = normalize_date_to_text_ddmmyyyy(df[col])
@@ -113,11 +124,9 @@ if uploaded_file:
 
     prog = st.progress(0)
     status = st.empty()
-
     cols_to_do = [c for c in bool_cols if c in df.columns]
     total_steps = len(cols_to_do) + 1
     step = 0
-
     for col in cols_to_do:
         df[col] = df[col].apply(transform_bool)
         step += 1
@@ -125,10 +134,7 @@ if uploaded_file:
         status.text(f"Transforming “{col}” — ≈ {total_steps-step}s remaining")
 
     status.text("Generating cleaned CSV…")
-
-    # Export with UTF-8 BOM to preserve £ and other symbols
     csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-
     step += 1
     prog.progress(step / total_steps)
     status.text("All done!")
