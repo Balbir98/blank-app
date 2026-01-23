@@ -50,9 +50,11 @@ def build_email_body_html(broker_first_name: str, lender_name: str, month_lines:
     """
     HTML email body:
     - Segoe UI font
+    - Confidentiality classification tag at top
     - Month lines bold + red
     - Key sentence bold
     - Objection lines (in quotes) bold; explanation lines normal
+    - Signature + legal disclaimer appended
     """
     month_html = "".join(
         [f'<div style="font-weight:700; color:#C00000; margin:6px 0;">{ml}</div>' for ml in month_lines]
@@ -60,7 +62,13 @@ def build_email_body_html(broker_first_name: str, lender_name: str, month_lines:
 
     return f"""
 <html>
-  <body style="font-family: 'Segoe UI', SegoeUI, Arial, sans-serif; font-size: 11pt; color: #111;">
+  <body style="font-family:'Segoe UI', SegoeUI, Arial, sans-serif; font-size:11pt; color:#111;">
+
+    <!-- Classification -->
+    <p style="margin:0 0 18px 0;">
+      <strong>Classification – <span style="color:#C00000;">Confidential</span></strong>
+    </p>
+
     <p>Hi {broker_first_name},</p>
 
     <p>Hope you’re well?</p>
@@ -95,6 +103,52 @@ def build_email_body_html(broker_first_name: str, lender_name: str, month_lines:
     Perfect - you can check their current options and compare the whole market, so they know they’re getting the best outcome.</p>
 
     <p>If you need anything else or want to talk through your approach, feel free to reach out.</p>
+
+    <!-- Signature -->
+    <p style="margin-top:24px;">Kind Regards,</p>
+
+    <p style="color:#ED7D31; font-weight:700; margin:0 0 2px 0;">
+      Robyn Truslove | Mortgage Development Manager
+    </p>
+
+    <p style="margin:0 0 12px 0;">
+      The Right Mortgage &amp; Protection Network
+    </p>
+
+    <p style="color:#ED7D31; font-weight:700; margin:0 0 12px 0;">
+      TRUST. RESPECT. PARTNERSHIP. OPPORTUNITY.
+    </p>
+
+    <p style="margin:0 0 12px 0;">
+      Phone:&nbsp;01564 732 744<br>
+      Web:&nbsp;<a href="https://www.therightmortgage.co.uk">www.therightmortgage.co.uk</a><br>
+      Email:&nbsp;<a href="mailto:robyn.truslove@therightmortgage.co.uk">robyn.truslove@therightmortgage.co.uk</a><br>
+      St Johns Court, 70 St John’s Close, Knowle, B93 0NH
+    </p>
+
+    <!-- Legal -->
+    <hr style="border:none; border-top:1px solid #ddd; margin:24px 0;">
+
+    <p style="font-size:9pt; margin:0 0 10px 0;">
+      This email and the information it contains may be privileged and/or confidential. It is for the intended addressee(s) only. The unauthorised use, disclosure or copying of this email, or any information it contains is prohibited and could in certain circumstances be a criminal offence. If you are not the intended recipient, please notify <a href="mailto:info@therightmortgage.co.uk">info@therightmortgage.co.uk</a> immediately and delete the message from your system.
+    </p>
+
+    <p style="font-size:9pt; margin:0 0 10px 0;">
+      Please note that The Right Mortgage does not enter into any form of contract by means of Internet email. None of the staff of The Right Mortgage is authorised to enter into contracts on behalf of the company in this way.  All contracts to which The Right Mortgage is a party are documented by other means.
+    </p>
+
+    <p style="font-size:9pt; margin:0 0 10px 0;">
+      The Right Mortgage monitors emails to ensure its systems operate effectively and to minimise the risk of viruses. Whilst it has taken reasonable steps to scan this email, it does not accept liability for any virus that it may contain.
+    </p>
+
+    <p style="font-size:9pt; margin:0 0 10px 0;">
+      Head Office: St Johns Court, 70 St Johns Close, Knowle, Solihull, B93 0NH. Registered in England no. 08130498
+    </p>
+
+    <p style="font-size:9pt; margin:0;">
+      The Right Mortgage &amp; Protection Network is a trading style of The Right Mortgage Limited, which is authorised and regulated by the Financial Conduct Authority
+    </p>
+
   </body>
 </html>
 """.strip()
