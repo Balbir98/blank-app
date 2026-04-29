@@ -96,8 +96,7 @@ def build_email_body_html(broker_first_name: str, lender_name: str, month_lines:
     <p><strong>• “I don’t have time to look into it.”</strong><br>
     You’ll handle everything and keep them updated. Zero hassle for them.</p>
 
-    <p><strong>• “I’ll think about it in the New Year.”</strong><br>
-    January gets busy and rates can move - locking in a plan now gives them clarity and avoids last-minute stress.</p>
+   
 
     <p><strong>• “I just want to stay with my current lender.”</strong><br>
     Perfect - you can check their current options and compare the whole market, so they know they’re getting the best outcome.</p>
