@@ -121,7 +121,7 @@ def build_email_body_html(broker_first_name: str, lender_name: str, month_lines:
     <p style="margin:0 0 12px 0;">
       Phone:&nbsp;01564 732 744<br>
       Web:&nbsp;<a href="https://www.therightmortgage.co.uk">www.therightmortgage.co.uk</a><br>
-      Email:&nbsp;<a href="mailto:robyn.truslove@therightmortgage.co.uk">robyn.truslove@therightmortgage.co.uk</a><br>
+      Email:&nbsp;<a href="mailto:robyn.james@therightmortgage.co.uk">robyn.james@therightmortgage.co.uk</a><br>
       St Johns Court, 70 St John’s Close, Knowle, B93 0NH
     </p>
 
