@@ -107,7 +107,7 @@ def build_email_body_html(broker_first_name: str, lender_name: str, month_lines:
     <p style="margin-top:24px;">Kind Regards,</p>
 
     <p style="color:#ED7D31; font-weight:700; margin:0 0 2px 0;">
-      Robyn Truslove | Mortgage Development Manager
+      Robyn James | Mortgage Development Manager
     </p>
 
     <p style="margin:0 0 12px 0;">
