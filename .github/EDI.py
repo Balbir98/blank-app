@@ -7,8 +7,8 @@ import streamlit as st
 
 st.set_page_config(page_title="COMTFR EDI to CSV", page_icon="📄", layout="wide")
 
-st.title("COMTFR EDI to CSV converter")
-st.caption("Uploads raw OpenText/EDIFACT files with no extension and converts CHD commission lines to CSV.")
+st.title("Aviva COMTFR EDI to CSV converter")
+st.caption("Uploads raw OpenText/EDIFACT files with no extension and converts Aviva CHD commission lines to CSV.")
 
 
 def read_uploaded_file(uploaded_file) -> str:
@@ -61,6 +61,44 @@ def parse_date(value: Optional[str]) -> str:
     if re.fullmatch(r"\d{6}", value):
         return f"20{value[0:2]}-{value[2:4]}-{value[4:6]}"
     return value
+
+
+def format_pounds_from_pence(value: Optional[str]) -> str:
+    """Convert pence values from the EDI file into a GBP display value."""
+    if value is None or str(value).strip() == "":
+        return ""
+    cleaned = str(value).strip().replace(",", "")
+    try:
+        amount = float(cleaned) / 100
+    except ValueError:
+        return str(value)
+    return f"£{amount:,.2f}"
+
+
+def build_aviva_output(df: pd.DataFrame) -> pd.DataFrame:
+    """Return the Aviva statement columns requested by the team."""
+    if df.empty:
+        return df
+
+    required_columns = [
+        "provider_detected", "nad_pa", "policy_reference", "surname", "forename",
+        "amount_qualifier", "amount", "premium_amount"
+    ]
+    for col in required_columns:
+        if col not in df.columns:
+            df[col] = ""
+
+    output = pd.DataFrame({
+        "Provider Name": df["provider_detected"].replace({"Aviva (tentative: seen in sample)": "Aviva"}),
+        "Agency Code": df["nad_pa"],
+        "Policy Reference": df["policy_reference"],
+        "Surname": df["surname"],
+        "First Name": df["forename"],
+        "Product Version": df["amount_qualifier"],
+        "Amount": df["amount"].apply(format_pounds_from_pence),
+        "Premium Amount": df["premium_amount"].apply(format_pounds_from_pence),
+    })
+    return output
 
 
 def parse_unb(fields: List[str]) -> Dict[str, str]:
@@ -217,7 +255,7 @@ def detect_provider(nads: Dict[str, str], sender: str, recipient: str) -> str:
     # We do not have reliable provider tags yet. This gives a helpful hint without depending on it.
     # Add new mappings here once OpenText/provider identifiers are confirmed.
     known_ids = {
-        "649443": "Aviva (tentative: seen in sample)",
+        "649443": "Aviva",
     }
     for value in [nads.get("BO", ""), nads.get("PA", ""), sender, recipient]:
         if value in known_ids:
@@ -345,7 +383,7 @@ with st.expander("What this app accepts", expanded=True):
     st.write(
         "This uploader deliberately has no file-type restriction, so files whose type only shows as "
         "`file` or `application/octet-stream` are accepted. It currently parses COMTFR-style EDIFACT "
-        "data generically, including the Aviva sample structure shown in the request."
+        "data and outputs the Aviva statement fields requested by the team."
     )
 
 uploaded_files = st.file_uploader(
@@ -368,25 +406,26 @@ if uploaded_files:
         st.warning("No CHD commission rows were found. Check whether the file is COMTFR EDIFACT and contains CHD segments.")
     else:
         df = pd.concat(all_frames, ignore_index=True)
-        st.success(f"Parsed {len(df):,} commission row(s) from {len(uploaded_files)} file(s).")
+        output_df = build_aviva_output(df)
+        st.success(f"Parsed {len(output_df):,} commission row(s) from {len(uploaded_files)} file(s).")
 
         st.subheader("Preview")
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(output_df, use_container_width=True)
 
-        csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
+        csv_bytes = output_df.to_csv(index=False).encode("utf-8-sig")
         st.download_button(
             "Download CSV",
             data=csv_bytes,
-            file_name="comtfr_converted.csv",
+            file_name="aviva_comtfr_converted.csv",
             mime="text/csv",
             type="primary",
         )
 
         with st.expander("Column notes"):
             st.markdown(
-                "- `provider_detected` is only a hint until each provider's identifiers are confirmed.\n"
+                "- This version outputs the Aviva statement fields requested by the team only.\n"
                 "- One CSV row is created for each `CHD` commission/charge line.\n"
-                "- `PDT`, `CNT`, and `UNT` values are backfilled onto the relevant rows where they appear after `CHD`."
+                "- `Amount` and `Premium Amount` are converted from pence to pounds and formatted with a £ symbol."
             )
 else:
     st.info("Upload one or more raw files to convert them.")
