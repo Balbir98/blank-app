@@ -15,7 +15,7 @@ provider = st.selectbox(
 )
 uploaded = st.file_uploader(
     "Upload the raw EDI text file",
-    type=["txt", "edi", "dat"],
+    type=None,
     accept_multiple_files=False
 )
 convert_clicked = st.button("Convert!", type="primary", disabled=(uploaded is None))
