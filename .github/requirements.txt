@@ -10,3 +10,4 @@ fpdf
 extract_msg
 scikit-learn
 matplotlib
+openpyxl
