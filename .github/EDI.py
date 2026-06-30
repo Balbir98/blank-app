@@ -5,7 +5,7 @@ from typing import Dict, List, Tuple, Optional
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="COMTFR EDI to CSV", page_icon="📄", layout="wide")
+st.set_page_config(page_title="EDI to CSV App!", page_icon="📄", layout="wide")
 
 st.title("Aviva COMTFR EDI to CSV converter")
 st.caption("Uploads raw OpenText/EDIFACT files with no extension and converts Aviva CHD commission lines to CSV.")
@@ -30,18 +30,52 @@ def clean_text(text: str) -> str:
     return text.replace("\n", "")
 
 
+def split_edifact(value: str, delimiter: str) -> List[str]:
+    """Split EDIFACT text on a delimiter, ignoring delimiters escaped with ?.
+
+    Example: O?'LOUGHLIN will not be split at the apostrophe because the
+    apostrophe is released/escaped by ?.
+    """
+    if value is None:
+        return []
+
+    parts = []
+    current = []
+    release_next = False
+
+    for char in str(value):
+        if release_next:
+            current.append(char)
+            release_next = False
+            continue
+
+        if char == "?":
+            current.append(char)
+            release_next = True
+            continue
+
+        if char == delimiter:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+
+    parts.append("".join(current))
+    return parts
+
+
 def parse_segments(text: str) -> List[str]:
     text = clean_text(text)
-    return [seg.strip() for seg in text.split("'") if seg.strip()]
+    return [seg.strip() for seg in split_edifact(text, "'") if seg.strip()]
 
 
 def tokenise(segment: str) -> Tuple[str, List[str]]:
-    parts = segment.split("+")
+    parts = split_edifact(segment, "+")
     return parts[0].strip(), parts[1:]
 
 
 def parse_composite(value: str) -> List[str]:
-    return value.split(":") if value is not None else []
+    return split_edifact(value, ":") if value is not None else []
 
 
 def strip_leading_zeros(value: Optional[str]) -> str:
