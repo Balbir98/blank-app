@@ -63,6 +63,27 @@ def parse_date(value: Optional[str]) -> str:
     return value
 
 
+
+
+def unescape_edifact(value: Optional[str]) -> str:
+    """Remove EDIFACT release characters from text values, especially names.
+
+    In EDIFACT, ? is used to escape reserved characters. For example:
+    O?'LOUGHLIN becomes O'LOUGHLIN.
+    """
+    if value is None:
+        return ""
+    return (
+        str(value)
+        .replace("??", "?")
+        .replace("?'", "'")
+        .replace("?:", ":")
+        .replace("?+", "+")
+        .replace("?\r", "")
+        .replace("?\n", "")
+    )
+
+
 def format_pounds_from_pence(value: Optional[str]) -> str:
     """Convert pence values from the EDI file into a GBP display value."""
     if value is None or str(value).strip() == "":
@@ -167,13 +188,16 @@ def parse_pol(fields: List[str]) -> Dict[str, str]:
         if field in ("PH", "MR", "PA", "IN"):
             out["party_qualifier"] = field
             if i + 1 < len(fields):
-                name_parts = parse_composite(fields[i + 1])
+                # Names can contain EDIFACT release characters, e.g. O?'LOUGHLIN:JOSEPH.
+                # Unescape before splitting so escaped reserved characters are treated as text.
+                name_field = unescape_edifact(fields[i + 1])
+                name_parts = parse_composite(name_field)
                 if len(name_parts) >= 1:
-                    out["name_format"] = name_parts[0]
+                    out["name_format"] = unescape_edifact(name_parts[0])
                 if len(name_parts) >= 2:
-                    out["surname"] = name_parts[1]
+                    out["surname"] = unescape_edifact(name_parts[1])
                 if len(name_parts) >= 3:
-                    out["forename"] = name_parts[2]
+                    out["forename"] = unescape_edifact(name_parts[2])
                 out["full_name"] = " ".join([p for p in [out["forename"], out["surname"]] if p]) or out["surname"]
             break
 
