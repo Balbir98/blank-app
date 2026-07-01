@@ -77,101 +77,120 @@ def find_header_row(rows, required_headers):
     return None
 
 
+def normalise_recruiter_name(value):
+    name = " ".join(normalise_text(value).split())
+    aliases = {
+        "steve howard": "Steven Howard",
+        "steven howard": "Steven Howard",
+    }
+    return aliases.get(name.lower(), name)
+
+
 def parse_support_cash_income(uploaded_file):
     """
     Parses the DA Support Cash Income Report.
 
-    Assumption:
-    - Recruiter/staff member name appears above each transaction table section.
-    - Each section has a header row matching SUPPORT_REQUIRED_HEADERS.
-    - Data continues until the next section header/recruiter or a blank break.
+    Actual report shape seen in the May 2026 file:
+    - One opening company/summary block appears immediately after the headers.
+    - That summary block ends with a row whose first cell is "Total".
+    - Recruiter sections then repeat as:
+        Recruiter name in column A
+        transaction rows
+        Total row
+    - The support report has one header row near the top, not a repeated header per recruiter.
     """
+    uploaded_file.seek(0)
     wb = load_workbook(uploaded_file, data_only=True)
     ws = wb[wb.sheetnames[0]]
     rows = [[cell.value for cell in row] for row in ws.iter_rows()]
 
+    header_idx = find_header_row(rows, SUPPORT_REQUIRED_HEADERS)
+    if header_idx is None:
+        raise ValueError(
+            "Could not find the support report header row containing: "
+            + ", ".join(SUPPORT_REQUIRED_HEADERS)
+        )
+
+    header_row = rows[header_idx]
+    header_map = {}
+    for col_idx, value in enumerate(header_row):
+        h = normalise_header(value)
+        if h:
+            header_map[h] = col_idx
+
+    missing = [h for h in SUPPORT_REQUIRED_HEADERS if normalise_header(h) not in header_map]
+    if missing:
+        raise ValueError(f"Support report is missing columns: {', '.join(missing)}")
+
+    def cell(row, header_name):
+        col = header_map[normalise_header(header_name)]
+        return row[col] if col < len(row) else None
+
     parsed_rows = []
     current_recruiter = None
-    i = 0
+    passed_opening_total = False
 
-    required_norm = [normalise_header(h) for h in SUPPORT_REQUIRED_HEADERS]
-
-    while i < len(rows):
-        row = rows[i]
+    for row_number, row in enumerate(rows[header_idx + 1 :], start=header_idx + 2):
         non_empty = [normalise_text(c) for c in row if normalise_text(c)]
+        if not non_empty:
+            continue
 
-        # Candidate recruiter row: one main text value, not a recognised table header.
-        row_norms = [normalise_header(c) for c in row if normalise_text(c)]
-        looks_like_header = all(h in row_norms for h in required_norm)
-        if non_empty and not looks_like_header:
-            # Use the first non-empty cell as recruiter name when the row is mostly a title row.
-            if len(non_empty) <= 3:
-                current_recruiter = non_empty[0]
+        first_cell = normalise_text(row[0]) if len(row) > 0 else ""
+        first_cell_lower = first_cell.lower()
 
-        if looks_like_header:
-            header_row = row
-            header_map = {}
-            for col_idx, value in enumerate(header_row):
-                h = normalise_header(value)
-                if h:
-                    header_map[h] = col_idx
+        # The first block is a company total/summary and should not be assigned to a recruiter.
+        # Every recruiter section also ends with a Total row.
+        if first_cell_lower.startswith("total"):
+            passed_opening_total = True
+            current_recruiter = None
+            continue
 
-            missing = [h for h in SUPPORT_REQUIRED_HEADERS if normalise_header(h) not in header_map]
-            if missing:
-                raise ValueError(f"Support report is missing columns: {', '.join(missing)}")
+        date_value = cell(row, "Date")
+        source_value = cell(row, "Source")
+        description_value = cell(row, "Description")
+        reference_value = cell(row, "Reference")
+        debit_value = cell(row, "Debit (GBP)")
+        credit_value = cell(row, "Credit (GBP)")
+        gross_value = cell(row, "Gross (GBP)")
+        vat_value = cell(row, "VAT (GBP)")
+        account_value = cell(row, "Account")
 
-            i += 1
-            while i < len(rows):
-                data_row = rows[i]
-                data_non_empty = [normalise_text(c) for c in data_row if normalise_text(c)]
-                data_norms = [normalise_header(c) for c in data_row if normalise_text(c)]
+        # Recruiter name rows have just a name in column A and appear only after the opening Total.
+        looks_like_recruiter_row = (
+            passed_opening_total
+            and first_cell
+            and len(non_empty) == 1
+            and not source_value
+            and not description_value
+            and not account_value
+        )
+        if looks_like_recruiter_row:
+            current_recruiter = normalise_recruiter_name(first_cell)
+            continue
 
-                next_header = all(h in data_norms for h in required_norm)
-                if next_header:
-                    i -= 1
-                    break
-
-                # A short standalone text row after data likely means next recruiter.
-                if data_non_empty and len(data_non_empty) <= 3:
-                    # If it has no date/description/account values, treat as next recruiter.
-                    date_val = data_row[header_map[normalise_header("Date")]] if header_map[normalise_header("Date")] < len(data_row) else None
-                    desc_val = data_row[header_map[normalise_header("Description")]] if header_map[normalise_header("Description")] < len(data_row) else None
-                    credit_val = data_row[header_map[normalise_header("Credit (GBP)")]] if header_map[normalise_header("Credit (GBP)")] < len(data_row) else None
-                    if not date_val and not desc_val and not credit_val:
-                        current_recruiter = data_non_empty[0]
-                        break
-
-                # Skip blank rows.
-                if not data_non_empty:
-                    i += 1
-                    continue
-
-                record = {h: None for h in SUPPORT_REQUIRED_HEADERS}
-                for h in SUPPORT_REQUIRED_HEADERS:
-                    col = header_map[normalise_header(h)]
-                    record[h] = data_row[col] if col < len(data_row) else None
-
-                # Only keep real transaction rows.
-                if record["Description"] or record["Account"] or record["Credit (GBP)"]:
-                    parsed_rows.append(
-                        {
-                            "Recruiter": current_recruiter or "Unknown Recruiter",
-                            "Date Received": record["Date"],
-                            "Firm": record["Description"],
-                            "Receipt Name": record["Account"],
-                            "Payment to TRDA Club": record["Credit (GBP)"],
-                            "Payment due": None,
-                            "Source File": "DA Support Cash Income Report",
-                        }
-                    )
-                i += 1
-        i += 1
+        # A real transaction row has a date and belongs to the current recruiter.
+        # Rows before the first recruiter are the opening summary and are intentionally skipped.
+        if current_recruiter and date_value:
+            parsed_rows.append(
+                {
+                    "Recruiter": current_recruiter,
+                    "Date Received": date_value,
+                    "Firm": description_value,
+                    "Receipt Name": account_value,
+                    "Payment to TRDA Club": credit_value,
+                    "Payment due": None,
+                    "Source File": "DA Support Cash Income Report",
+                    "Debug Row": row_number,
+                }
+            )
 
     df = pd.DataFrame(parsed_rows)
     if df.empty:
-        raise ValueError("No transaction rows were found in the support cash income report.")
+        raise ValueError(
+            "No recruiter transaction rows were found in the support cash income report. "
+            "Expected format: opening summary, Total row, then recruiter name rows in column A."
+        )
     return df
-
 
 def parse_monthly_statement(uploaded_file, statement_date):
     """Parses DA-Monthly Statement."""
@@ -197,7 +216,7 @@ def parse_monthly_statement(uploaded_file, statement_date):
 
     out = pd.DataFrame(
         {
-            "Recruiter": df["Sold By"].astype(str).str.strip(),
+            "Recruiter": df["Sold By"].apply(normalise_recruiter_name),
             "Date Received": statement_date,
             "Firm": df["DA Firm Name"],
             "Receipt Name": "Commission",
@@ -287,6 +306,7 @@ def build_zip(template_file, combined_df, only_shared):
 
 st.set_page_config(page_title="DA Statement Builder", page_icon="📄", layout="wide")
 st.title("DA Statement Builder")
+st.caption("Version v2.3 - fixed support report parser: skips opening Cash Basis block, reads recruiter sections after Total rows")
 st.write(
     "Upload the DA Support Cash Income Report, DA-Monthly Statement, and statement template. "
     "The app will create one populated template per recruiter and package them in a ZIP."
@@ -334,7 +354,7 @@ if run:
         monthly_df = parse_monthly_statement(monthly_file, statement_date)
 
         combined_df = pd.concat([support_df, monthly_df], ignore_index=True)
-        combined_df["Recruiter"] = combined_df["Recruiter"].astype(str).str.strip()
+        combined_df["Recruiter"] = combined_df["Recruiter"].apply(normalise_recruiter_name)
 
         zip_buffer, recruiters, support_recruiters, monthly_recruiters = build_zip(
             template_file=template_file,
@@ -348,6 +368,18 @@ if run:
         col1.metric("Support report recruiters", len(support_recruiters))
         col2.metric("Monthly statement recruiters", len(monthly_recruiters))
         col3.metric("Files in ZIP", len(recruiters))
+
+        with st.expander("Parser diagnostics", expanded=True):
+            st.write("Support report rows by recruiter:")
+            st.dataframe(
+                support_df["Recruiter"].value_counts().rename_axis("Recruiter").reset_index(name="Rows"),
+                use_container_width=True,
+            )
+            st.write("Monthly statement rows by recruiter:")
+            st.dataframe(
+                monthly_df["Recruiter"].value_counts().rename_axis("Recruiter").reset_index(name="Rows"),
+                use_container_width=True,
+            )
 
         missing_from_monthly = sorted(support_recruiters - monthly_recruiters)
         missing_from_support = sorted(monthly_recruiters - support_recruiters)
