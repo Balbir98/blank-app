@@ -288,7 +288,19 @@ def build_zip(template_file, combined_df, only_shared):
         for recruiter in recruiters:
             recruiter_df = combined_df[combined_df["Recruiter"].astype(str).str.strip() == recruiter].copy()
             recruiter_df = recruiter_df[TEMPLATE_HEADERS + ["Source File"]]
-            recruiter_df = recruiter_df.sort_values(["Date Received", "Firm"], kind="stable")
+
+            # Sort safely. Some Streamlit/Pandas versions can error when sorting
+            # mixed Excel date objects, strings, blanks, or categorical values directly.
+            recruiter_df["_sort_date"] = pd.to_datetime(
+                recruiter_df["Date Received"], errors="coerce"
+            )
+            recruiter_df["_sort_firm"] = recruiter_df["Firm"].fillna("").astype(str)
+            recruiter_df = recruiter_df.sort_values(
+                by=["_sort_date", "_sort_firm"],
+                ascending=[True, True],
+                na_position="last",
+                kind="mergesort",
+            ).drop(columns=["_sort_date", "_sort_firm"])
 
             # Need a fresh template stream for each recruiter.
             template_file.seek(0)
@@ -306,7 +318,7 @@ def build_zip(template_file, combined_df, only_shared):
 
 st.set_page_config(page_title="DA Statement Builder", page_icon="📄", layout="wide")
 st.title("DA Statement Builder")
-st.caption("Version v2.3 - fixed support report parser: skips opening Cash Basis block, reads recruiter sections after Total rows")
+st.caption("Version v2.4 - fixed support parser and date sorting")
 st.write(
     "Upload the DA Support Cash Income Report, DA-Monthly Statement, and statement template. "
     "The app will create one populated template per recruiter and package them in a ZIP."
