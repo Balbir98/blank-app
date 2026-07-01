@@ -8,6 +8,8 @@ import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
 
+APP_VERSION = "v2.1 - Steve/Steven recruiter alias"
+
 
 # -----------------------------
 # Helpers
@@ -45,6 +47,18 @@ def normalise_text(value):
     if value is None:
         return ""
     return str(value).strip()
+
+
+RECRUITER_ALIASES = {
+    "steve howard": "Steven Howard",
+    "steven howard": "Steven Howard",
+}
+
+
+def normalise_recruiter(value):
+    name = normalise_text(value)
+    name = re.sub(r"\s+", " ", name).strip()
+    return RECRUITER_ALIASES.get(name.lower(), name)
 
 
 def normalise_header(value):
@@ -155,7 +169,7 @@ def parse_support_cash_income(uploaded_file):
                 if record["Description"] or record["Account"] or record["Credit (GBP)"]:
                     parsed_rows.append(
                         {
-                            "Recruiter": current_recruiter or "Unknown Recruiter",
+                            "Recruiter": normalise_recruiter(current_recruiter or "Unknown Recruiter"),
                             "Date Received": record["Date"],
                             "Firm": record["Description"],
                             "Receipt Name": record["Account"],
@@ -197,7 +211,7 @@ def parse_monthly_statement(uploaded_file, statement_date):
 
     out = pd.DataFrame(
         {
-            "Recruiter": df["Sold By"].astype(str).str.strip(),
+            "Recruiter": df["Sold By"].apply(normalise_recruiter),
             "Date Received": statement_date,
             "Firm": df["DA Firm Name"],
             "Receipt Name": "Commission",
@@ -287,6 +301,7 @@ def build_zip(template_file, combined_df, only_shared):
 
 st.set_page_config(page_title="DA Statement Builder", page_icon="📄", layout="wide")
 st.title("DA Statement Builder")
+st.caption(APP_VERSION)
 st.write(
     "Upload the DA Support Cash Income Report, DA-Monthly Statement, and statement template. "
     "The app will create one populated template per recruiter and package them in a ZIP."
@@ -294,6 +309,7 @@ st.write(
 
 with st.sidebar:
     st.header("Uploads")
+    st.caption("Active alias: Steve Howard -> Steven Howard")
     support_file = st.file_uploader(
         "1. DA Support Cash Income Report",
         type=["xlsx", "xlsm", "xls"],
@@ -334,7 +350,7 @@ if run:
         monthly_df = parse_monthly_statement(monthly_file, statement_date)
 
         combined_df = pd.concat([support_df, monthly_df], ignore_index=True)
-        combined_df["Recruiter"] = combined_df["Recruiter"].astype(str).str.strip()
+        combined_df["Recruiter"] = combined_df["Recruiter"].apply(normalise_recruiter)
 
         zip_buffer, recruiters, support_recruiters, monthly_recruiters = build_zip(
             template_file=template_file,
