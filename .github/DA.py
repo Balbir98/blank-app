@@ -318,7 +318,7 @@ def build_zip(template_file, combined_df, only_shared):
 
 st.set_page_config(page_title="DA Statement Builder", page_icon="📄", layout="wide")
 st.title("DA Statement Builder")
-st.caption("Version v2.4 - fixed support parser and date sorting")
+st.caption("Version v2.5 - download only, no preview table")
 st.write(
     "Upload the DA Support Cash Income Report, DA-Monthly Statement, and statement template. "
     "The app will create one populated template per recruiter and package them in a ZIP."
@@ -381,18 +381,6 @@ if run:
         col2.metric("Monthly statement recruiters", len(monthly_recruiters))
         col3.metric("Files in ZIP", len(recruiters))
 
-        with st.expander("Parser diagnostics", expanded=True):
-            st.write("Support report rows by recruiter:")
-            st.dataframe(
-                support_df["Recruiter"].value_counts().rename_axis("Recruiter").reset_index(name="Rows"),
-                use_container_width=True,
-            )
-            st.write("Monthly statement rows by recruiter:")
-            st.dataframe(
-                monthly_df["Recruiter"].value_counts().rename_axis("Recruiter").reset_index(name="Rows"),
-                use_container_width=True,
-            )
-
         missing_from_monthly = sorted(support_recruiters - monthly_recruiters)
         missing_from_support = sorted(monthly_recruiters - support_recruiters)
 
@@ -406,9 +394,6 @@ if run:
                 "Recruiters found in monthly statement but not support report: "
                 + ", ".join(missing_from_support)
             )
-
-        st.subheader("Preview of combined data")
-        st.dataframe(combined_df[TEMPLATE_HEADERS + ["Source File"]], use_container_width=True)
 
         st.download_button(
             label="Download ZIP",
