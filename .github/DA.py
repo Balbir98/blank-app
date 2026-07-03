@@ -212,11 +212,15 @@ def parse_monthly_statement(uploaded_file, statement_date):
 
     df = df[MONTHLY_REQUIRED_HEADERS].copy()
     df = df.dropna(how="all")
-    df = df[df["Sold By"].notna()]
+
+    # Keep rows even when Sold By is blank. These go into a separate
+    # statement so Chelsea can review and clean them in Zoho CRM.
+    recruiter_series = df["Sold By"].apply(normalise_recruiter_name)
+    recruiter_series = recruiter_series.replace("", "No Recruiter")
 
     out = pd.DataFrame(
         {
-            "Recruiter": df["Sold By"].apply(normalise_recruiter_name),
+            "Recruiter": recruiter_series,
             "Date Received": statement_date,
             "Firm": df["DA Firm Name"],
             "Receipt Name": "Commission",
@@ -282,7 +286,9 @@ def build_zip(template_file, combined_df, only_shared):
     if only_shared:
         recruiters = sorted(support_recruiters.intersection(monthly_recruiters))
     else:
-        recruiters = sorted(set(combined_df["Recruiter"].dropna().astype(str).str.strip()))
+        recruiters = sorted(
+            r for r in set(combined_df["Recruiter"].dropna().astype(str).str.strip()) if r
+        )
 
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for recruiter in recruiters:
@@ -318,7 +324,7 @@ def build_zip(template_file, combined_df, only_shared):
 
 st.set_page_config(page_title="DA Statement Builder", page_icon="📄", layout="wide")
 st.title("DA Statement Builder")
-st.caption("Version v2.5 - download only, no preview table")
+st.caption("Version v2.6 - all recruiters, including one-sided and no-recruiter rows")
 st.write(
     "Upload the DA Support Cash Income Report, DA-Monthly Statement, and statement template. "
     "The app will create one populated template per recruiter and package them in a ZIP."
@@ -351,7 +357,8 @@ with st.sidebar:
 
     only_shared = st.checkbox(
         "Only create files for recruiters found in both spreadsheets",
-        value=True,
+        value=False,
+        help="Leave unticked to create files for every recruiter, including recruiters found in only one spreadsheet and rows with no recruiter.",
     )
 
 run = st.button("Build recruiter statement ZIP", type="primary")
