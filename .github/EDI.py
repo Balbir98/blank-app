@@ -5,10 +5,10 @@ from typing import Dict, List, Tuple, Optional
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="EDI to CSV App!", page_icon="📄", layout="wide")
+st.set_page_config(page_title="COMTFR EDI to Excel", page_icon="📄", layout="wide")
 
-st.title("Aviva COMTFR EDI to CSV converter")
-st.caption("Uploads raw OpenText/EDIFACT files with no extension and converts Aviva CHD commission lines to CSV.")
+st.title("COMTFR EDI to Excel converter")
+st.caption("Upload raw OpenText/EDIFACT files with no extension and convert CHD commission lines to an Excel-friendly output.")
 
 
 def read_uploaded_file(uploaded_file) -> str:
@@ -25,41 +25,30 @@ def read_uploaded_file(uploaded_file) -> str:
 def clean_text(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"^End-of-Header:\s*\n", "", text, flags=re.IGNORECASE | re.MULTILINE)
-    # Some copied files include whitespace/newlines inside the EDI payload. Keep spaces in names,
-    # but remove line breaks that can split segments.
     return text.replace("\n", "")
 
 
 def split_edifact(value: str, delimiter: str) -> List[str]:
-    """Split EDIFACT text on a delimiter, ignoring delimiters escaped with ?.
-
-    Example: O?'LOUGHLIN will not be split at the apostrophe because the
-    apostrophe is released/escaped by ?.
-    """
+    """Split EDIFACT text on a delimiter, ignoring delimiters escaped with ?."""
     if value is None:
         return []
-
     parts = []
     current = []
     release_next = False
-
     for char in str(value):
         if release_next:
             current.append(char)
             release_next = False
             continue
-
         if char == "?":
             current.append(char)
             release_next = True
             continue
-
         if char == delimiter:
             parts.append("".join(current))
             current = []
         else:
             current.append(char)
-
     parts.append("".join(current))
     return parts
 
@@ -97,14 +86,8 @@ def parse_date(value: Optional[str]) -> str:
     return value
 
 
-
-
 def unescape_edifact(value: Optional[str]) -> str:
-    """Remove EDIFACT release characters from text values, especially names.
-
-    In EDIFACT, ? is used to escape reserved characters. For example:
-    O?'LOUGHLIN becomes O'LOUGHLIN.
-    """
+    """Remove EDIFACT release characters from text values."""
     if value is None:
         return ""
     return (
@@ -130,11 +113,22 @@ def format_pounds_from_pence(value: Optional[str]) -> str:
     return f"£{amount:,.2f}"
 
 
+def extract_lg_name_parts(surname_value: str, forename_value: str = "") -> Tuple[str, str]:
+    """L&G often sends U:SURNAME INITIAL, so split the final single-letter token as first name/initial."""
+    surname_value = unescape_edifact(surname_value).strip()
+    forename_value = unescape_edifact(forename_value).strip()
+    if forename_value:
+        return surname_value, forename_value
+    parts = surname_value.split()
+    if len(parts) >= 2 and len(parts[-1]) <= 3:
+        return " ".join(parts[:-1]), parts[-1]
+    return surname_value, ""
+
+
 def build_aviva_output(df: pd.DataFrame) -> pd.DataFrame:
     """Return the Aviva statement columns requested by the team."""
     if df.empty:
         return df
-
     required_columns = [
         "provider_detected", "nad_pa", "policy_reference", "surname", "forename",
         "amount_qualifier", "amount", "premium_amount"
@@ -142,25 +136,61 @@ def build_aviva_output(df: pd.DataFrame) -> pd.DataFrame:
     for col in required_columns:
         if col not in df.columns:
             df[col] = ""
-
-    output = pd.DataFrame({
+    return pd.DataFrame({
         "Provider Name": df["provider_detected"].replace({"Aviva (tentative: seen in sample)": "Aviva"}),
         "Agency Code": df["nad_pa"],
         "Policy Reference": df["policy_reference"],
         "Surname": df["surname"],
         "First Name": df["forename"],
-        "Product Version": df["amount_qualifier"],
+        "Product Version": df["amount_qualifier"].astype(str).str.strip(),
         "Amount": df["amount"].apply(format_pounds_from_pence),
         "Premium Amount": df["premium_amount"].apply(format_pounds_from_pence),
     })
-    return output
+
+
+def build_lg_output(df: pd.DataFrame) -> pd.DataFrame:
+    """Return an Excel-friendly L&G statement output using the same basic layout as Aviva."""
+    if df.empty:
+        return df
+    required_columns = [
+        "nad_pa", "policy_reference", "surname", "forename", "product_code",
+        "amount_qualifier", "amount", "premium_amount", "ifn_reference"
+    ]
+    for col in required_columns:
+        if col not in df.columns:
+            df[col] = ""
+
+    names = df.apply(lambda r: extract_lg_name_parts(r.get("surname", ""), r.get("forename", "")), axis=1)
+    surnames = [x[0] for x in names]
+    first_names = [x[1] for x in names]
+
+    return pd.DataFrame({
+        "Provider Name": "L&G",
+        "Agency Code": df["nad_pa"],
+        "Policy Reference": df["policy_reference"],
+        "IFN Reference": df["ifn_reference"],
+        "Surname": surnames,
+        "First Name": first_names,
+        "Product Code": df["product_code"],
+        "Product Version": df["amount_qualifier"].astype(str).str.strip(),
+        "Amount": df["amount"].apply(format_pounds_from_pence),
+        "Premium Amount": df["premium_amount"].apply(format_pounds_from_pence),
+    })
+
+
+def dataframe_to_xlsx_bytes(df: pd.DataFrame) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Converted Data")
+        worksheet = writer.sheets["Converted Data"]
+        for column_cells in worksheet.columns:
+            max_length = max(len(str(cell.value)) if cell.value is not None else 0 for cell in column_cells)
+            worksheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 12), 40)
+    return output.getvalue()
 
 
 def parse_unb(fields: List[str]) -> Dict[str, str]:
-    # UNB+UNOA:1+sender+recipient+YYMMDD:HHMM+control_ref...
-    out = {
-        "syntax": "", "sender": "", "recipient": "", "datetime_raw": "", "control_ref": ""
-    }
+    out = {"syntax": "", "sender": "", "recipient": "", "datetime_raw": "", "control_ref": ""}
     if len(fields) > 0:
         out["syntax"] = fields[0]
     if len(fields) > 1:
@@ -202,7 +232,7 @@ def parse_rff(fields: List[str]) -> Dict[str, str]:
     for field in fields:
         if ":" in field:
             key, value = field.split(":", 1)
-            refs[key] = value
+            refs[key] = unescape_edifact(value)
     return refs
 
 
@@ -211,10 +241,6 @@ def parse_pol(fields: List[str]) -> Dict[str, str]:
         "basis_of_sale": "", "party_qualifier": "", "name_format": "",
         "surname": "", "forename": "", "full_name": "", "product_code": ""
     }
-
-    # Common examples:
-    # L&G: POL+59+PH+U:SMITH A+XYZ
-    # Aviva sample: POL++PH+F:Miller:Paul
     if fields and re.fullmatch(r"\d{2}", fields[0] or ""):
         out["basis_of_sale"] = fields[0]
 
@@ -222,22 +248,19 @@ def parse_pol(fields: List[str]) -> Dict[str, str]:
         if field in ("PH", "MR", "PA", "IN"):
             out["party_qualifier"] = field
             if i + 1 < len(fields):
-                # Names can contain EDIFACT release characters, e.g. O?'LOUGHLIN:JOSEPH.
-                # Unescape before splitting so escaped reserved characters are treated as text.
                 name_field = unescape_edifact(fields[i + 1])
                 name_parts = parse_composite(name_field)
                 if len(name_parts) >= 1:
                     out["name_format"] = unescape_edifact(name_parts[0])
                 if len(name_parts) >= 2:
-                    out["surname"] = unescape_edifact(name_parts[1])
+                    out["surname"] = unescape_edifact(name_parts[1]).strip()
                 if len(name_parts) >= 3:
-                    out["forename"] = unescape_edifact(name_parts[2])
+                    out["forename"] = unescape_edifact(name_parts[2]).strip()
                 out["full_name"] = " ".join([p for p in [out["forename"], out["surname"]] if p]) or out["surname"]
             break
 
-    # Use the final short alphanumeric token as product code if present and not the name field.
     if fields:
-        last = fields[-1]
+        last = unescape_edifact(fields[-1]).strip()
         if last and ":" not in last and last not in ("PH", "MR", "PA", "IN") and not re.fullmatch(r"\d{2}", last):
             out["product_code"] = last
     return out
@@ -252,19 +275,17 @@ def parse_chd(fields: List[str]) -> Dict[str, str]:
     if fields:
         c516 = parse_composite(fields[0])
         if len(c516) > 0:
-            out["amount_qualifier"] = c516[0]
+            out["amount_qualifier"] = unescape_edifact(c516[0]).strip()
         if len(c516) > 1:
             out["amount"] = c516[1]
         if len(c516) > 2:
             out["currency"] = c516[2]
-
     if len(fields) > 1:
         c876 = parse_composite(fields[1])
         if len(c876) > 0:
             out["currency_qualifier"] = c876[0]
         if len(c876) > 1:
             out["charge_type"] = c876[1]
-
     cdd_idx = None
     for idx, field in enumerate(fields[2:], start=2):
         if field.startswith("CDD:"):
@@ -276,7 +297,6 @@ def parse_chd(fields: List[str]) -> Dict[str, str]:
             if len(cdd) > 2:
                 out["due_date_format"] = cdd[2]
             break
-
     if cdd_idx is not None and cdd_idx + 1 < len(fields):
         prem = parse_composite(fields[cdd_idx + 1])
         if len(prem) > 0:
@@ -310,10 +330,10 @@ def parse_cnt(fields: List[str]) -> Dict[str, str]:
 
 
 def detect_provider(nads: Dict[str, str], sender: str, recipient: str) -> str:
-    # We do not have reliable provider tags yet. This gives a helpful hint without depending on it.
-    # Add new mappings here once OpenText/provider identifiers are confirmed.
     known_ids = {
         "649443": "Aviva",
+        "01090009002001": "L&G",
+        "9106931": "L&G",
     }
     for value in [nads.get("BO", ""), nads.get("PA", ""), sender, recipient]:
         if value in known_ids:
@@ -324,9 +344,7 @@ def detect_provider(nads: Dict[str, str], sender: str, recipient: str) -> str:
 def convert_comtfr(text: str) -> pd.DataFrame:
     rows: List[Dict[str, str]] = []
     segments = parse_segments(text)
-
     envelope = {"syntax": "", "sender": "", "recipient": "", "datetime_raw": "", "control_ref": ""}
-    message = {}
     nads: Dict[str, str] = {}
     current_gis = ""
     current_policy = ""
@@ -344,10 +362,8 @@ def convert_comtfr(text: str) -> pd.DataFrame:
 
     for segment in segments:
         tag, fields = tokenise(segment)
-
         if tag == "UNB":
             envelope = parse_unb(fields)
-
         elif tag == "UNH":
             message = reset_message()
             nads = {}
@@ -360,18 +376,14 @@ def convert_comtfr(text: str) -> pd.DataFrame:
             if len(fields) > 1:
                 message["message_type"] = fields[1]
             message_row_indexes.setdefault(message["unh_number"], [])
-
         elif tag == "BGM":
             message.update(parse_bgm(fields))
-
         elif tag == "NAD":
             qual, value = parse_nad(fields)
             if qual:
                 nads[qual] = value
-
         elif tag == "GIS":
             current_gis = fields[0] if fields else ""
-
         elif tag == "RFF":
             refs = parse_rff(fields)
             if "POL" in refs:
@@ -379,10 +391,8 @@ def convert_comtfr(text: str) -> pd.DataFrame:
                 current_pol = {}
             if "IFN" in refs and current_policy:
                 current_ifn_by_policy[current_policy] = refs["IFN"]
-
         elif tag == "POL":
             current_pol = parse_pol(fields)
-
         elif tag == "CHD":
             chd = parse_chd(fields)
             row = {
@@ -414,35 +424,32 @@ def convert_comtfr(text: str) -> pd.DataFrame:
             }
             rows.append(row)
             message_row_indexes.setdefault(message.get("unh_number", ""), []).append(len(rows) - 1)
-
         elif tag == "PDT":
             pdt = parse_pdt(fields)
             indexes = message_row_indexes.get(message.get("unh_number", ""), [])
             if indexes:
                 rows[indexes[-1]].update(pdt)
-
         elif tag == "CNT":
             cnt = parse_cnt(fields)
             for idx in message_row_indexes.get(message.get("unh_number", ""), []):
                 rows[idx]["cnt_count"] = cnt.get("cnt_count", "")
                 rows[idx]["cnt_amount"] = cnt.get("cnt_amount", "")
-
         elif tag == "UNT":
             count = fields[0] if len(fields) > 0 else ""
             control = fields[1] if len(fields) > 1 else ""
             for idx in message_row_indexes.get(message.get("unh_number", ""), []):
                 rows[idx]["unt_segment_count"] = count
                 rows[idx]["unt_control_ref"] = control
-
     return pd.DataFrame(rows)
 
 
 with st.expander("What this app accepts", expanded=True):
     st.write(
         "This uploader deliberately has no file-type restriction, so files whose type only shows as "
-        "`file` or `application/octet-stream` are accepted. It currently parses COMTFR-style EDIFACT "
-        "data and outputs the Aviva statement fields requested by the team."
+        "`file` or `application/octet-stream` are accepted. Select the provider before converting."
     )
+
+provider = st.selectbox("Provider", ["Aviva", "L&G"], index=0)
 
 uploaded_files = st.file_uploader(
     "Upload raw OpenText file(s)",
@@ -464,26 +471,52 @@ if uploaded_files:
         st.warning("No CHD commission rows were found. Check whether the file is COMTFR EDIFACT and contains CHD segments.")
     else:
         df = pd.concat(all_frames, ignore_index=True)
-        output_df = build_aviva_output(df)
+        if provider == "Aviva":
+            output_df = build_aviva_output(df)
+            file_stem = "aviva_comtfr_converted"
+        else:
+            output_df = build_lg_output(df)
+            file_stem = "lg_comtfr_converted"
+
         st.success(f"Parsed {len(output_df):,} commission row(s) from {len(uploaded_files)} file(s).")
+
+        detected = sorted(set(str(x) for x in df.get("provider_detected", pd.Series(dtype=str)).dropna().unique()))
+        if detected:
+            st.caption("Provider clue(s) detected in file: " + ", ".join(detected))
 
         st.subheader("Preview")
         st.dataframe(output_df, use_container_width=True)
+
+        xlsx_bytes = dataframe_to_xlsx_bytes(output_df)
+        st.download_button(
+            "Download Excel",
+            data=xlsx_bytes,
+            file_name=f"{file_stem}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+        )
 
         csv_bytes = output_df.to_csv(index=False).encode("utf-8-sig")
         st.download_button(
             "Download CSV",
             data=csv_bytes,
-            file_name="aviva_comtfr_converted.csv",
+            file_name=f"{file_stem}.csv",
             mime="text/csv",
-            type="primary",
         )
 
         with st.expander("Column notes"):
-            st.markdown(
-                "- This version outputs the Aviva statement fields requested by the team only.\n"
-                "- One CSV row is created for each `CHD` commission/charge line.\n"
-                "- `Amount` and `Premium Amount` are converted from pence to pounds and formatted with a £ symbol."
-            )
+            if provider == "Aviva":
+                st.markdown(
+                    "- This keeps the Aviva output exactly as agreed with the team.\n"
+                    "- One row is created for each `CHD` commission/charge line.\n"
+                    "- `Amount` and `Premium Amount` are converted from pence to pounds."
+                )
+            else:
+                st.markdown(
+                    "- L&G is identified in the supplied sample by `UNB` sender `01090009002001`.\n"
+                    "- L&G names appear as `U:SURNAME INITIAL`, unlike Aviva's `F:SURNAME:FIRSTNAME` structure.\n"
+                    "- `Product Code` comes from the final value in the `POL` segment, for example `DTA`, `LTA`, or `DTCI`.\n"
+                    "- `Amount` and `Premium Amount` are converted from pence to pounds."
+                )
 else:
     st.info("Upload one or more raw files to convert them.")
