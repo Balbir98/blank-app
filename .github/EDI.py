@@ -348,6 +348,7 @@ def convert_comtfr(text: str) -> pd.DataFrame:
     nads: Dict[str, str] = {}
     current_gis = ""
     current_policy = ""
+    current_lg_name = ""
     current_ifn_by_policy: Dict[str, str] = {}
     current_pol: Dict[str, str] = {}
     message_row_indexes: Dict[str, List[int]] = {}
@@ -369,6 +370,7 @@ def convert_comtfr(text: str) -> pd.DataFrame:
             nads = {}
             current_gis = ""
             current_policy = ""
+            current_lg_name = ""
             current_ifn_by_policy = {}
             current_pol = {}
             if len(fields) > 0:
@@ -386,15 +388,38 @@ def convert_comtfr(text: str) -> pd.DataFrame:
             current_gis = fields[0] if fields else ""
         elif tag == "RFF":
             refs = parse_rff(fields)
+
+            # Standard policy reference used by Aviva and most L&G records.
             if "POL" in refs:
                 current_policy = refs["POL"]
                 current_pol = {}
+                current_lg_name = ""
+
+            # Some L&G records use SNO for the policy/statement number instead of POL.
+            if "SNO" in refs:
+                current_policy = refs["SNO"]
+                current_pol = {}
+                current_lg_name = ""
+
+            # Some L&G corporate records carry the client name in RFF+SNM rather than POL.
+            if "SNM" in refs:
+                current_lg_name = refs["SNM"].strip()
+
             if "IFN" in refs and current_policy:
                 current_ifn_by_policy[current_policy] = refs["IFN"]
         elif tag == "POL":
             current_pol = parse_pol(fields)
+            if current_lg_name and not current_pol.get("surname"):
+                current_pol["surname"] = current_lg_name
+                current_pol["full_name"] = current_lg_name
         elif tag == "CHD":
             chd = parse_chd(fields)
+
+            # Final fallback for L&G company-name records where the name only appears in RFF+SNM.
+            if current_lg_name and not current_pol.get("surname"):
+                current_pol["surname"] = current_lg_name
+                current_pol["full_name"] = current_lg_name
+
             row = {
                 "provider_detected": detect_provider(nads, envelope.get("sender", ""), envelope.get("recipient", "")),
                 "interchange_control_ref": envelope.get("control_ref", ""),
@@ -514,8 +539,9 @@ if uploaded_files:
             else:
                 st.markdown(
                     "- L&G is identified in the supplied sample by `UNB` sender `01090009002001`.\n"
-                    "- L&G names appear as `U:SURNAME INITIAL`, unlike Aviva's `F:SURNAME:FIRSTNAME` structure.\n"
-                    "- `Product Code` comes from the final value in the `POL` segment, for example `DTA`, `LTA`, or `DTCI`.\n"
+                    "- L&G names usually appear as `U:SURNAME INITIAL`; some company records use `RFF+SNM`, which is now treated as the client name.\n"
+                    "- L&G policy references may come from `RFF+POL` or, for some records, `RFF+SNO`.\n"
+                    "- `Product Code` comes from the final value in the `POL` segment, for example `DTA`, `LTA`, `DTCI`, or `GLIF`.\n"
                     "- `Amount` and `Premium Amount` are converted from pence to pounds."
                 )
 else:
