@@ -314,14 +314,22 @@ def transform_wishlist(form_df: pd.DataFrame, costs_df: pd.DataFrame) -> pd.Data
     out['Added Time'] = out['_ridx'].map(added_series)
 
     # Attach per-row notes answers (hidden)
+    # NOTE: fixed to check pd.isna() directly instead of relying on
+    # .astype(str) turning every missing value into the literal string "nan".
+    # Newer pandas (Arrow-backed dtypes) can leave a raw float NaN in place,
+    # which crashes .lower() with "'float' object has no attribute 'lower'".
     if q1_col:
         q1_by_ridx = data_rows[q1_col]
-        out['_note_q1'] = out['_ridx'].map(q1_by_ridx).astype(str).apply(lambda s: "" if s.lower() == "nan" else s).fillna("")
+        out['_note_q1'] = out['_ridx'].map(q1_by_ridx).apply(
+            lambda s: "" if pd.isna(s) or str(s).strip().lower() == "nan" else str(s)
+        )
     else:
         out['_note_q1'] = ""
     if q2_col:
         q2_by_ridx = data_rows[q2_col]
-        out['_note_q2'] = out['_ridx'].map(q2_by_ridx).astype(str).apply(lambda s: "" if s.lower() == "nan" else s).fillna("")
+        out['_note_q2'] = out['_ridx'].map(q2_by_ridx).apply(
+            lambda s: "" if pd.isna(s) or str(s).strip().lower() == "nan" else str(s)
+        )
     else:
         out['_note_q2'] = ""
 
