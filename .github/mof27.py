@@ -6,18 +6,13 @@ Upload the Zoho export, the 2027 MOF Cost Sheet, and the 2027 order form templat
 
 from __future__ import annotations
 
-import copy
 import re
-import warnings
 import zipfile
 from io import BytesIO
 
 import pandas as pd
-from openpyxl import load_workbook
-from openpyxl.styles import Alignment
 from openpyxl.utils import get_column_letter
-from openpyxl.worksheet.datavalidation import DataValidation
-from openpyxl.workbook.defined_name import DefinedName
+from xml.dom import minidom
 
 
 START_ROW = 15
@@ -26,6 +21,11 @@ UNSELECTED = {"", "no", "false", "0", "none", "n/a", "not selected", "unchecked"
 MONTHS = {"jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
           "january", "february", "march", "april", "june", "july", "august", "september", "october",
           "november", "december", "q1", "q2", "q3", "q4"}
+FULL_MONTHS = {
+    "jan": "January", "feb": "February", "mar": "March", "apr": "April", "may": "May",
+    "jun": "June", "jul": "July", "aug": "August", "sep": "September",
+    "sept": "September", "oct": "October", "nov": "November", "dec": "December",
+}
 NOTES = (
     "Please provide any feedback on our Marketing & Opportunities 2027 Pack and webinar:",
     "Please provide any further notes you may have or want to have considered with this form:",
@@ -83,9 +83,15 @@ def choices(value: str) -> list[str]:
 
 def quantity(value: str) -> int | None:
     s = clean_text(value)
-    if re.fullmatch(r"\d+(?:\.0+)?", s):
-        return int(float(s))
+    match = re.match(r"^(?:quantity\s*[:=]?\s*)?(\d+)(?:\.0+)?(?:\s*(?:ticket|tickets|place|places))?$", s, re.I)
+    if match:
+        return int(match.group(1))
     return None
+
+
+def full_month(value: str) -> str:
+    value = clean_text(value)
+    return FULL_MONTHS.get(value.casefold(), value)
 
 
 def read_form(upload) -> pd.DataFrame:
@@ -188,7 +194,7 @@ def transform_wishlist(form: pd.DataFrame, costs: pd.DataFrame) -> pd.DataFrame:
             records.append({
                 "Submission": submission_no, **contact,
                 "Type": matched_type, "Event": matched_event,
-                "Event Date (if applicable)": date, "Qty": qty,
+                "Event Date (if applicable)": full_month(date), "Qty": qty,
                 "Cost": price, "Line Total": price * qty if price is not None else None,
                 "Match Status": status, "Zoho Field": source,
                 "_note_q1": _get(row, NOTES[0]), "_note_q2": _get(row, NOTES[1]),
@@ -256,142 +262,300 @@ def transform_wishlist(form: pd.DataFrame, costs: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame.from_records(records)
 
 
-def _defined(wb, name: str, target: str):
-    wb.defined_names.add(DefinedName(name, attr_text=target))
+# The supplied template contains Excel array-formula metadata, shared formulas,
+# shapes and x14 validations. openpyxl rewrites these on save. Preserve the
+# original OOXML package and edit only the relevant worksheet XML instead.
+SPARE_ROWS = 50
+CELL_RE = re.compile(r"^([A-Z]+)(\d+)$")
 
 
-def _configure_dropdowns(wb, ws, costs: pd.DataFrame, last_item_row: int):
-    """Static named lists avoid fragile dynamic-array validation in generated files."""
-    if "_MOF Dropdowns" in wb:
-        del wb["_MOF Dropdowns"]
-    helper = wb.create_sheet("_MOF Dropdowns")
+def _direct(parent, tag):
+    return next((n for n in parent.childNodes if n.nodeType == n.ELEMENT_NODE and n.tagName == tag), None)
+
+
+def _children(parent, tag):
+    return [n for n in parent.childNodes if n.nodeType == n.ELEMENT_NODE and n.tagName == tag]
+
+
+def _put_text(parent, tag, value):
+    node = _direct(parent, tag)
+    if node is None:
+        node = parent.ownerDocument.createElement(tag)
+        parent.appendChild(node)
+    while node.firstChild:
+        node.removeChild(node.firstChild)
+    node.appendChild(parent.ownerDocument.createTextNode(str(value)))
+    return node
+
+
+def _column_number(letter):
+    number = 0
+    for ch in letter:
+        number = number * 26 + ord(ch) - ord("A") + 1
+    return number
+
+
+def _get_row(sheet_data, number):
+    for row in _children(sheet_data, "row"):
+        rr = int(row.getAttribute("r"))
+        if rr == number:
+            return row
+        if rr > number:
+            new = sheet_data.ownerDocument.createElement("row")
+            new.setAttribute("r", str(number))
+            sheet_data.insertBefore(new, row)
+            return new
+    new = sheet_data.ownerDocument.createElement("row")
+    new.setAttribute("r", str(number))
+    sheet_data.appendChild(new)
+    return new
+
+
+def _get_cell(sheet_data, address):
+    col, rr = CELL_RE.fullmatch(address).groups()
+    row = _get_row(sheet_data, int(rr))
+    target = _column_number(col)
+    for cell in _children(row, "c"):
+        cc = _column_number(CELL_RE.fullmatch(cell.getAttribute("r")).group(1))
+        if cc == target:
+            return cell
+        if cc > target:
+            new = sheet_data.ownerDocument.createElement("c")
+            new.setAttribute("r", address)
+            row.insertBefore(new, cell)
+            return new
+    new = sheet_data.ownerDocument.createElement("c")
+    new.setAttribute("r", address)
+    row.appendChild(new)
+    return new
+
+
+def _set_cell(sheet_data, address, value, *, formula=False, style=None, array=False):
+    cell = _get_cell(sheet_data, address)
+    for child in list(cell.childNodes):
+        cell.removeChild(child)
+    for attr in ("t", "cm", "vm"):
+        if cell.hasAttribute(attr):
+            cell.removeAttribute(attr)
+    if style is not None:
+        cell.setAttribute("s", str(style))
+    if value is None or value == "":
+        return
+    if formula:
+        f = _put_text(cell, "f", value.lstrip("="))
+        if array:
+            f.setAttribute("t", "array")
+            f.setAttribute("ref", address)
+            cell.setAttribute("cm", "1")
+        cell.appendChild(cell.ownerDocument.createElement("v"))
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        _put_text(cell, "v", value)
+    else:
+        cell.setAttribute("t", "inlineStr")
+        inline = cell.ownerDocument.createElement("is")
+        t = _put_text(inline, "t", value)
+        if str(value) != str(value).strip():
+            t.setAttribute("xml:space", "preserve")
+        cell.appendChild(inline)
+
+
+def _formula_e(rr):
+    return (f'IF(OR(A{rr}="",B{rr}=""),"",IFERROR(_xlfn.XLOOKUP(1,'
+            f"('Cost Sheet'!$A$2:$A$1000=A{rr})*('Cost Sheet'!$B$2:$B$1000=B{rr}),"
+            "'Cost Sheet'!$C$2:$C$1000),\"\"))")
+
+
+def _shift_footer(sheet_data, delta):
+    if not delta:
+        return
+    for row in reversed(_children(sheet_data, "row")):
+        rr = int(row.getAttribute("r"))
+        if rr < 45:
+            continue
+        row.setAttribute("r", str(rr + delta))
+        for cell in _children(row, "c"):
+            old = cell.getAttribute("r")
+            col = CELL_RE.fullmatch(old).group(1)
+            cell.setAttribute("r", f"{col}{rr + delta}")
+
+
+def _named_ranges(wb_doc, types, events_by_type):
+    defined = wb_doc.getElementsByTagName("definedNames")[0]
+    for name in list(_children(defined, "definedName")):
+        if name.getAttribute("name").startswith("MOF"):
+            defined.removeChild(name)
+    def add(name, target):
+        node = wb_doc.createElement("definedName")
+        node.setAttribute("name", name)
+        node.appendChild(wb_doc.createTextNode(target))
+        defined.appendChild(node)
+    add("MOFTypes", f"'Cost Sheet'!$J$2:$J${len(types)+1}")
+    add("MOFEmpty", "'Cost Sheet'!$J$1000")
+    for i, events in enumerate(events_by_type, start=1):
+        col = get_column_letter(i + 10)
+        add(f"MOFEvents_{i:03d}", f"'Cost Sheet'!${col}$2:${col}${len(events)+1}")
+    for node in _children(defined, "definedName"):
+        if node.getAttribute("name") == "_xlnm.Print_Area" and node.getAttribute("localSheetId") == "1":
+            # Updated by populate_template once the footer's new row is known.
+            return node
+    return None
+
+
+def _cost_helpers(cost_doc, costs):
+    root = cost_doc.documentElement
+    sheet_data = _direct(root, "sheetData")
+    for rr in range(2, max(103, len(costs) + 2)):
+        for col in "ABC":
+            _set_cell(sheet_data, f"{col}{rr}", None)
+    for rr, (_, rec) in enumerate(costs.iterrows(), start=2):
+        _set_cell(sheet_data, f"A{rr}", rec["Type"])
+        _set_cell(sheet_data, f"B{rr}", rec["Event"])
+        _set_cell(sheet_data, f"C{rr}", float(rec["Cost"]) if pd.notna(rec["Cost"]) else None)
     types = sorted(costs["Type"].unique(), key=str.casefold)
+    events_by_type = []
+    _set_cell(sheet_data, "J1", "Type dropdown")
     for i, typ in enumerate(types, start=2):
-        helper.cell(i, 1, typ)
+        _set_cell(sheet_data, f"J{i}", typ)
         events = costs.loc[costs["Type"] == typ, "Event"].drop_duplicates().tolist()
-        for j, event in enumerate(events, start=2):
-            helper.cell(j, i, event)
-        col = get_column_letter(i)
-        _defined(wb, f"MOFEvents_{i - 1:03d}", f"'_MOF Dropdowns'!${col}$2:${col}${max(2, len(events)+1)}")
-    helper["A1"] = "Type"
-    helper["A1000"] = ""  # Named fallback cell for an unselected Type.
-    _defined(wb, "MOFTypes", f"'_MOF Dropdowns'!$A$2:$A${len(types)+1}")
-    _defined(wb, "MOFEmpty", "'_MOF Dropdowns'!$A$1000")
-    _defined(wb, "MOFInvoice", "'When to Invoice'!$A$1:$A$3")
-    helper.sheet_state = "hidden"
-
-    # The template uses x14 validation, which openpyxl cannot retain. Recreate
-    # the existing invoice dropdown and replace the Type/Event validations.
-    ws.data_validations.dataValidation.clear()
-    invoice = DataValidation(type="list", formula1="MOFInvoice", allow_blank=True)
-    ws.add_data_validation(invoice)
-    invoice.add("D4")
-    typ_dv = DataValidation(type="list", formula1="MOFTypes", allow_blank=True)
-    ws.add_data_validation(typ_dv)
-    typ_dv.add(f"A{START_ROW}:A{last_item_row}")
-    event_dv = DataValidation(
-        type="list",
-        formula1='INDIRECT(IFERROR("MOFEvents_"&TEXT(MATCH($A15,MOFTypes,0),"000"),"MOFEmpty"))',
-        allow_blank=True,
-    )
-    ws.add_data_validation(event_dv)
-    event_dv.add(f"B{START_ROW}:B{last_item_row}")
+        events_by_type.append(events)
+        col = get_column_letter(i + 9)
+        for rr, event in enumerate(events, start=2):
+            _set_cell(sheet_data, f"{col}{rr}", event)
+    cols = _direct(root, "cols")
+    hidden = cost_doc.createElement("col")
+    hidden.setAttribute("min", "10")
+    hidden.setAttribute("max", str(10 + len(types)))
+    hidden.setAttribute("hidden", "1")
+    hidden.setAttribute("width", "8")
+    hidden.setAttribute("customWidth", "1")
+    cols.appendChild(hidden)
+    _direct(root, "dimension").setAttribute("ref", f"A1:{get_column_letter(10+len(types))}{max(102,len(costs)+1)}")
+    return types, events_by_type
 
 
-def _sync_embedded_cost_sheet(wb, costs: pd.DataFrame):
-    if "Cost Sheet" not in wb:
-        raise ValueError("Template must contain a Cost Sheet tab for its Charge formulas.")
-    ws = wb["Cost Sheet"]
-    for row in ws.iter_rows(min_row=2, max_row=max(ws.max_row, len(costs)+1), min_col=1, max_col=3):
-        for cell in row:
-            cell.value = None
-    for i, c in enumerate(costs.itertuples(index=False), start=2):
-        ws.cell(i, 1, c.Type)
-        ws.cell(i, 2, c.Event)
-        ws.cell(i, 3, c.Cost if pd.notna(c.Cost) else None)
-    return ws
+def _data_validations(sheet_doc, last_item):
+    root = sheet_doc.documentElement
+    # Keep the template's x14 invoice dropdown at D4. The old A/B validations
+    # reference one Event list for every row; replace those with standard ones.
+    ext = _direct(root, "extLst")
+    if ext is not None:
+        for data in ext.getElementsByTagName("x14:dataValidations"):
+            for dv in list(_children(data, "x14:dataValidation")):
+                sqref = dv.getElementsByTagName("xm:sqref")
+                if sqref and sqref[0].firstChild and sqref[0].firstChild.nodeValue.startswith(("A15", "B15")):
+                    data.removeChild(dv)
+            data.setAttribute("count", str(len(_children(data, "x14:dataValidation"))))
+    old = _direct(root, "dataValidations")
+    if old is not None:
+        root.removeChild(old)
+    dvs = sheet_doc.createElement("dataValidations")
+    dvs.setAttribute("count", "2")
+    for rng, source in [
+        (f"A15:A{last_item}", "MOFTypes"),
+        (f"B15:B{last_item}",
+         'INDIRECT(IFERROR("MOFEvents_"&TEXT(MATCH($A15,MOFTypes,0),"000"),"MOFEmpty"))'),
+    ]:
+        dv = sheet_doc.createElement("dataValidation")
+        dv.setAttribute("type", "list")
+        dv.setAttribute("allowBlank", "1")
+        dv.setAttribute("showErrorMessage", "1")
+        dv.setAttribute("sqref", rng)
+        _put_text(dv, "formula1", source)
+        dvs.appendChild(dv)
+    # OOXML worksheet order places dataValidations before pageMargins.
+    root.insertBefore(dvs, _direct(root, "pageMargins"))
+
+
+def _set_notes(notes_doc, first):
+    data = _direct(notes_doc.documentElement, "sheetData")
+    for addr, field in [("A2", NOTES[0]), ("A3", NOTES[1]),
+                        ("B2", first.get("_note_q1", "")), ("B3", first.get("_note_q2", ""))]:
+        _set_cell(data, addr, field)
+    _direct(notes_doc.documentElement, "dimension").setAttribute("ref", "A1:H3")
 
 
 def populate_template(template_bytes: bytes, rows: pd.DataFrame, costs: pd.DataFrame) -> bytes:
-    # Existing x14 dropdown extensions are replaced below with standard Excel
-    # validations, so a warning about removing that particular extension is expected.
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message="Data Validation extension is not supported")
-        wb = load_workbook(BytesIO(template_bytes))
-    if "Marketing Order Form" not in wb:
-        raise ValueError("Template must contain the Marketing Order Form tab.")
-    ws = wb["Marketing Order Form"]
-    if ws["A14"].value != "Type" or ws["B14"].value != "Product":
-        raise ValueError("Template needs Type and Product headings at A14/B14.")
-    _sync_embedded_cost_sheet(wb, costs)
+    with zipfile.ZipFile(BytesIO(template_bytes)) as original:
+        data = {name: original.read(name) for name in original.namelist()}
+        info = {z.filename: z for z in original.infolist()}
+    required = ("xl/worksheets/sheet2.xml", "xl/worksheets/sheet3.xml",
+                "xl/worksheets/sheet4.xml", "xl/workbook.xml")
+    if not all(name in data for name in required):
+        raise ValueError("The supplied 2027 template has a different sheet structure.")
+    sheet = minidom.parseString(data["xl/worksheets/sheet2.xml"])
+    cost_sheet = minidom.parseString(data["xl/worksheets/sheet4.xml"])
+    notes = minidom.parseString(data["xl/worksheets/sheet3.xml"])
+    workbook = minidom.parseString(data["xl/workbook.xml"])
+
     n = len(rows)
-    extra = max(0, n - (BASE_LAST_ROW - START_ROW + 1))
-    if extra:
-        ws.insert_rows(BASE_LAST_ROW + 1, amount=extra)
-        for r in range(BASE_LAST_ROW + 1, BASE_LAST_ROW + extra + 1):
-            for col in range(1, 9):
-                source = ws.cell(BASE_LAST_ROW, col)
-                dest = ws.cell(r, col)
-                if source.has_style:
-                    dest._style = copy.copy(source._style)
-                dest.alignment = copy.copy(source.alignment)
-            ws.row_dimensions[r].height = ws.row_dimensions[BASE_LAST_ROW].height
-    last_item_row = BASE_LAST_ROW + extra
-
+    last_item = max(44, START_ROW + n + SPARE_ROWS - 1)
+    delta = last_item - 44
+    root = sheet.documentElement
+    sheet_data = _direct(root, "sheetData")
+    _shift_footer(sheet_data, delta)
     first = rows.iloc[0] if n else {}
-    address = {
-        "B4": "Provider Name", "B6": "Name", "D6": "Phone", "F6": "Email",
-        "B10": "Events Name", "B12": "Events Email",
-        "D10": "Marketing Publications Name", "D12": "Marketing Publications Email",
-        "F10": "Invoice Name", "F12": "Invoice Email",
-        "H10": "Copy Name", "H12": "Copy Email",
-    }
-    for cell, field in address.items():
-        ws[cell] = first.get(field, "") if n else ""
-    ws["D4"] = first.get("When To Invoice", "") if n else ""
-
-    for offset in range(last_item_row - START_ROW + 1):
+    fields = {"B4": "Provider Name", "B6": "Name", "D4": "When To Invoice",
+              "D6": "Phone", "F6": "Email", "B10": "Events Name", "B12": "Events Email",
+              "D10": "Marketing Publications Name", "D12": "Marketing Publications Email",
+              "F10": "Invoice Name", "F12": "Invoice Email", "H10": "Copy Name", "H12": "Copy Email"}
+    for address, field in fields.items():
+        _set_cell(sheet_data, address, first.get(field, "") if n else "")
+    for offset in range(last_item - START_ROW + 1):
         rr = START_ROW + offset
-        if offset < n:
-            item = rows.iloc[offset]
-            ws.cell(rr, 1, item["Type"])
-            ws.cell(rr, 2, item["Event"])
-            ws.cell(rr, 3, "" if item["Match Status"] == "Matched" else "CHECK COST")
-            ws.cell(rr, 4, item["Event Date (if applicable)"])
-            ws.cell(rr, 6, int(item["Qty"]))
-        else:
-            for col in (1, 2, 3, 4, 6):
-                ws.cell(rr, col, None)
-        # Preserve the template's intended Type + Event lookup and Total logic.
-        # For extra rows beyond its preconfigured 29, reproduce the same formula.
-        if rr > BASE_LAST_ROW:
-            ws.cell(rr, 5,
-                    f'=IF(OR(A{rr}="",B{rr}=""),"",IFERROR(_xlfn.XLOOKUP(1,'
-                    f'(\'Cost Sheet\'!$A$2:$A$1000=A{rr})*(\'Cost Sheet\'!$B$2:$B$1000=B{rr}),'
-                    f'\'Cost Sheet\'!$C$2:$C$1000),""))')
-            ws.cell(rr, 7, f'=IF(F{rr}="","",E{rr}*F{rr})')
+        item = rows.iloc[offset] if offset < n else None
+        for col, value in (
+            ("A", item["Type"] if item is not None else None),
+            ("B", item["Event"] if item is not None else None),
+            ("C", "CHECK COST" if item is not None and item["Match Status"] != "Matched" else None),
+            ("D", item["Event Date (if applicable)"] if item is not None else None),
+            ("F", int(item["Qty"]) if item is not None else None),
+        ):
+            _set_cell(sheet_data, f"{col}{rr}", value, style=6 if rr > 44 else None)
+        if rr >= 44:
+            _set_cell(sheet_data, f"E{rr}", _formula_e(rr), formula=True, style=32, array=True)
+            _set_cell(sheet_data, f"G{rr}", f'IF(F{rr}="","",E{rr}*F{rr})', formula=True, style=33)
+    footer = 45 + delta
+    _set_cell(sheet_data, f"H{footer}", f"SUM(G{START_ROW}:G{last_item})", formula=True)
+    _set_cell(sheet_data, f"H{footer+4}", f"H{footer}-H{footer+2}", formula=True)
+    _set_cell(sheet_data, f"H{footer+6}", f"H{footer+4}/5", formula=True)
+    _set_cell(sheet_data, f"H{footer+8}", f"H{footer+4}+H{footer+6}", formula=True)
+    _direct(root, "dimension").setAttribute("ref", f"A1:I{footer+8}")
+    _data_validations(sheet, last_item)
 
-    # openpyxl does not update summary formulas when inserting rows.
-    total_row = 45 + extra
-    ws.cell(total_row, 8, f"=SUM(G{START_ROW}:G{last_item_row})")
-    ws.cell(49+extra, 8, f"=H{45+extra}-H{47+extra}")
-    ws.cell(51+extra, 8, f"=H{49+extra}/5")
-    ws.cell(53+extra, 8, f"=H{49+extra}+H{51+extra}")
-    _configure_dropdowns(wb, ws, costs, last_item_row)
-
-    notes = wb["Notes"] if "Notes" in wb else wb.create_sheet("Notes")
-    notes["A2"] = NOTES[0]
-    notes["A3"] = NOTES[1]
-    notes["B2"] = first.get("_note_q1", "") if n else ""
-    notes["B3"] = first.get("_note_q2", "") if n else ""
-    for cell in ("B2", "B3"):
-        notes[cell].alignment = Alignment(wrap_text=True, vertical="top")
-    # Excel calculates XLOOKUP and the total formula when the file opens.
-    wb.calculation.fullCalcOnLoad = True
-    wb.calculation.forceFullCalc = True
-    wb.calculation.calcMode = "auto"
+    types, events = _cost_helpers(cost_sheet, costs)
+    area = _named_ranges(workbook, types, events)
+    if area is not None:
+        while area.firstChild:
+            area.removeChild(area.firstChild)
+        area.appendChild(workbook.createTextNode(f"'Marketing Order Form'!$A$2:$H${footer+8}"))
+    calc = workbook.getElementsByTagName("calcPr")
+    if calc:
+        calc[0].setAttribute("fullCalcOnLoad", "1")
+        calc[0].setAttribute("forceFullCalc", "1")
+    _set_notes(notes, first)
+    data["xl/worksheets/sheet2.xml"] = sheet.toxml(encoding="utf-8")
+    data["xl/worksheets/sheet3.xml"] = notes.toxml(encoding="utf-8")
+    data["xl/worksheets/sheet4.xml"] = cost_sheet.toxml(encoding="utf-8")
+    data["xl/workbook.xml"] = workbook.toxml(encoding="utf-8")
+    # A formula chain from the old template has stale footer coordinates.
+    data.pop("xl/calcChain.xml", None)
+    rels_path = "xl/_rels/workbook.xml.rels"
+    if rels_path in data:
+        rels = minidom.parseString(data[rels_path])
+        for rel in list(rels.getElementsByTagName("Relationship")):
+            if rel.getAttribute("Type").endswith("/calcChain"):
+                rel.parentNode.removeChild(rel)
+        data[rels_path] = rels.toxml(encoding="utf-8")
+    ct_path = "[Content_Types].xml"
+    ct = minidom.parseString(data[ct_path])
+    for node in list(ct.getElementsByTagName("Override")):
+        if node.getAttribute("PartName") == "/xl/calcChain.xml":
+            node.parentNode.removeChild(node)
+    data[ct_path] = ct.toxml(encoding="utf-8")
     output = BytesIO()
-    wb.save(output)
+    with zipfile.ZipFile(output, "w") as z:
+        for name, contents in data.items():
+            z.writestr(info[name], contents)
     return output.getvalue()
 
 
