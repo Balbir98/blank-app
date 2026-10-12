@@ -11,3 +11,4 @@ scikit-learn==1.9.1
 matplotlib==3.11.2
 python-dateutil==2.9.0.post0
 asyncio
+openpyxl==3.1.5
