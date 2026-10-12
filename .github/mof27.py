@@ -262,9 +262,9 @@ def transform_wishlist(form: pd.DataFrame, costs: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame.from_records(records)
 
 
-# The supplied template contains Excel array-formula metadata, shared formulas,
-# shapes and x14 validations. openpyxl rewrites these on save. Preserve the
-# original OOXML package and edit only the relevant worksheet XML instead.
+# The supplied template contains shapes and x14 validations. Preserve its
+# original OOXML package, but replace the template's shared/array charge
+# formulas with ordinary formulas before extending the order form.
 SPARE_ROWS = 50
 CELL_RE = re.compile(r"^([A-Z]+)(\d+)$")
 
@@ -360,9 +360,11 @@ def _set_cell(sheet_data, address, value, *, formula=False, style=None, array=Fa
 
 
 def _formula_e(rr):
-    return (f'IF(OR(A{rr}="",B{rr}=""),"",IFERROR(_xlfn.XLOOKUP(1,'
-            f"('Cost Sheet'!$A$2:$A$1000=A{rr})*('Cost Sheet'!$B$2:$B$1000=B{rr}),"
-            "'Cost Sheet'!$C$2:$C$1000),\"\"))")
+    # The cost sheet's hidden D column is a two-field key. INDEX/MATCH uses
+    # an ordinary cell formula, without Excel dynamic-array cell metadata.
+    return (f'IF(OR(A{rr}="",B{rr}=""),"",IFERROR(INDEX('
+            f"'Cost Sheet'!$C$2:$C$1000,MATCH(A{rr}&CHAR(31)&B{rr},"
+            "'Cost Sheet'!$D$2:$D$1000,0)),\"\"))")
 
 
 def _shift_footer(sheet_data, delta):
@@ -411,6 +413,9 @@ def _cost_helpers(cost_doc, costs):
         _set_cell(sheet_data, f"A{rr}", rec["Type"])
         _set_cell(sheet_data, f"B{rr}", rec["Event"])
         _set_cell(sheet_data, f"C{rr}", float(rec["Cost"]) if pd.notna(rec["Cost"]) else None)
+    for rr in range(2, 1001):
+        _set_cell(sheet_data, f"D{rr}",
+                  f'IF(OR(A{rr}="",B{rr}=""),"",A{rr}&CHAR(31)&B{rr})', formula=True)
     types = sorted(costs["Type"].unique(), key=str.casefold)
     events_by_type = []
     _set_cell(sheet_data, "J1", "Type dropdown")
@@ -422,6 +427,18 @@ def _cost_helpers(cost_doc, costs):
         for rr, event in enumerate(events, start=2):
             _set_cell(sheet_data, f"{col}{rr}", event)
     cols = _direct(root, "cols")
+    key_col = cost_doc.createElement("col")
+    key_col.setAttribute("min", "4")
+    key_col.setAttribute("max", "4")
+    key_col.setAttribute("hidden", "1")
+    key_col.setAttribute("width", "8")
+    key_col.setAttribute("customWidth", "1")
+    for existing in _children(cols, "col"):
+        if int(existing.getAttribute("min")) > 4:
+            cols.insertBefore(key_col, existing)
+            break
+    else:
+        cols.appendChild(key_col)
     hidden = cost_doc.createElement("col")
     hidden.setAttribute("min", "10")
     hidden.setAttribute("max", str(10 + len(types)))
@@ -429,7 +446,7 @@ def _cost_helpers(cost_doc, costs):
     hidden.setAttribute("width", "8")
     hidden.setAttribute("customWidth", "1")
     cols.appendChild(hidden)
-    _direct(root, "dimension").setAttribute("ref", f"A1:{get_column_letter(10+len(types))}{max(102,len(costs)+1)}")
+    _direct(root, "dimension").setAttribute("ref", f"A1:{get_column_letter(10+len(types))}1000")
     return types, events_by_type
 
 
@@ -511,9 +528,10 @@ def populate_template(template_bytes: bytes, rows: pd.DataFrame, costs: pd.DataF
             ("F", int(item["Qty"]) if item is not None else None),
         ):
             _set_cell(sheet_data, f"{col}{rr}", value, style=6 if rr > 44 else None)
-        if rr >= 44:
-            _set_cell(sheet_data, f"E{rr}", _formula_e(rr), formula=True, style=32, array=True)
-            _set_cell(sheet_data, f"G{rr}", f'IF(F{rr}="","",E{rr}*F{rr})', formula=True, style=33)
+        # Rewrite every existing formula too. Leaving the template's shared
+        # G16:G43 group and E15:E43 array metadata triggers Excel repair.
+        _set_cell(sheet_data, f"E{rr}", _formula_e(rr), formula=True, style=32)
+        _set_cell(sheet_data, f"G{rr}", f'IF(F{rr}="","",E{rr}*F{rr})', formula=True, style=33)
     footer = 45 + delta
     _set_cell(sheet_data, f"H{footer}", f"SUM(G{START_ROW}:G{last_item})", formula=True)
     _set_cell(sheet_data, f"H{footer+4}", f"H{footer}-H{footer+2}", formula=True)
