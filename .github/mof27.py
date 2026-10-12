@@ -1,19 +1,14 @@
 """2026–27 Marketing Order Form generator.
-
 Run with: streamlit run MOF26-27.py
 Upload the Zoho export, the 2027 MOF Cost Sheet, and the 2027 order form template.
 """
-
 from __future__ import annotations
-
 import re
 import zipfile
 from io import BytesIO
-
 import pandas as pd
 from openpyxl.utils import get_column_letter
 from xml.dom import minidom
-
 
 START_ROW = 15
 BASE_LAST_ROW = 43
@@ -48,17 +43,14 @@ CONTACTS = {
     "Added Time": ("Added Time",),
 }
 
-
 def clean_text(value) -> str:
     if value is None or pd.isna(value):
         return ""
     return re.sub(r"\s+", " ", str(value).replace("\u00a0", " ")).strip()
 
-
 def key(value) -> str:
     """Match spacing/case and a hyphen with variable surrounding spaces."""
     return re.sub(r"\s*-\s*", "-", clean_text(value)).casefold()
-
 
 def choices(value: str) -> list[str]:
     """Split commas between choices, never commas inside parentheses."""
@@ -80,7 +72,6 @@ def choices(value: str) -> list[str]:
         parts.append(part)
     return parts
 
-
 def quantity(value: str) -> int | None:
     s = clean_text(value)
     match = re.match(r"^(?:quantity\s*[:=]?\s*)?(\d+)(?:\.0+)?(?:\s*(?:ticket|tickets|place|places))?$", s, re.I)
@@ -88,11 +79,9 @@ def quantity(value: str) -> int | None:
         return int(match.group(1))
     return None
 
-
 def full_month(value: str) -> str:
     value = clean_text(value)
     return FULL_MONTHS.get(value.casefold(), value)
-
 
 def read_form(upload) -> pd.DataFrame:
     raw = upload.getvalue() if hasattr(upload, "getvalue") else upload
@@ -115,7 +104,6 @@ def read_form(upload) -> pd.DataFrame:
     df.attrs["subheader_row"] = bool(is_subheader)
     return df
 
-
 def read_costs(upload) -> pd.DataFrame:
     raw = upload.getvalue() if hasattr(upload, "getvalue") else upload
     if getattr(upload, "name", "").lower().endswith((".csv", ".txt")):
@@ -135,7 +123,6 @@ def read_costs(upload) -> pd.DataFrame:
     df["_key"] = list(zip(df["Type"].map(key), df["Event"].map(key)))
     return df
 
-
 def _cost_match(costs: pd.DataFrame, typ: str, event: str):
     matches = costs.loc[costs["_key"].map(lambda x: x == (key(typ), key(event)))]
     if matches.empty:
@@ -145,7 +132,6 @@ def _cost_match(costs: pd.DataFrame, typ: str, event: str):
     status = ("No price in Cost Sheet" if not len(prices) else
               "Matched" if len(prices) == 1 else "Conflicting prices in Cost Sheet")
     return first["Type"], first["Event"], first["Cost"] if pd.notna(first["Cost"]) else None, status
-
 
 def _specialist_type(event: str) -> str:
     e = key(event)
@@ -159,17 +145,14 @@ def _specialist_type(event: str) -> str:
         return "Specialist Events (Buy-to-Let)"
     return "Specialist Events"
 
-
 def _month_choice(value: str) -> bool:
     return all(key(x) in MONTHS for x in choices(value))
-
 
 def _get(row: pd.Series, *names: str) -> str:
     for name in names:
         if name in row.index and clean_text(row[name]):
             return clean_text(row[name])
     return ""
-
 
 def transform_wishlist(form: pd.DataFrame, costs: pd.DataFrame) -> pd.DataFrame:
     subheaders = form.attrs.get("subheaders", pd.Series("", index=form.columns))
@@ -180,13 +163,11 @@ def transform_wishlist(form: pd.DataFrame, costs: pd.DataFrame) -> pd.DataFrame:
     cost_by_type = {}
     for _, c in costs.iterrows():
         cost_by_type.setdefault(key(c["Type"]), []).append(c["Event"])
-
     for submission_no, (_, row) in enumerate(submissions.iterrows(), start=1):
         contact = {name: _get(row, *variants) for name, variants in CONTACTS.items()}
         dt = pd.to_datetime(contact["Added Time"], errors="coerce", dayfirst=False)
         contact["Added Time"] = dt.strftime("%d/%m/%Y") if pd.notna(dt) else contact["Added Time"]
         parent = ""
-
         def add(typ: str, event: str, date: str = "", qty: int = 1, source: str = ""):
             if not typ or not event:
                 return
@@ -199,7 +180,6 @@ def transform_wishlist(form: pd.DataFrame, costs: pd.DataFrame) -> pd.DataFrame:
                 "Match Status": status, "Zoho Field": source,
                 "_note_q1": _get(row, NOTES[0]), "_note_q2": _get(row, NOTES[1]),
             })
-
         for col in form.columns:
             is_unnamed = str(col).startswith("Unnamed:")
             if not is_unnamed and col not in ignore:
@@ -211,7 +191,6 @@ def transform_wishlist(form: pd.DataFrame, costs: pd.DataFrame) -> pd.DataFrame:
                 continue
             sub = clean_text(subheaders.get(col, ""))
             source = f"{parent} / {sub}" if sub else parent
-
             if parent == "Additional Gala Ticket" or parent == "Additional Daytime Ticket":
                 add("National Training Event & Awards Gala Dinner", parent, qty=quantity(value) or 1, source=source)
             elif parent.startswith("Regional Sales Roadshows"):
@@ -258,24 +237,19 @@ def transform_wishlist(form: pd.DataFrame, costs: pd.DataFrame) -> pd.DataFrame:
             else:
                 for option in choices(value):
                     add(parent, option, source=source)
-
     return pd.DataFrame.from_records(records)
 
-
-# The supplied template contains shapes and x14 validations. Preserve its
-# original OOXML package, but replace the template's shared/array charge
-# formulas with ordinary formulas before extending the order form.
+# The supplied template contains Excel array-formula metadata, shared formulas,
+# shapes and x14 validations. openpyxl rewrites these on save. Preserve the
+# original OOXML package and edit only the relevant worksheet XML instead.
 SPARE_ROWS = 50
 CELL_RE = re.compile(r"^([A-Z]+)(\d+)$")
-
 
 def _direct(parent, tag):
     return next((n for n in parent.childNodes if n.nodeType == n.ELEMENT_NODE and n.tagName == tag), None)
 
-
 def _children(parent, tag):
     return [n for n in parent.childNodes if n.nodeType == n.ELEMENT_NODE and n.tagName == tag]
-
 
 def _put_text(parent, tag, value):
     node = _direct(parent, tag)
@@ -287,13 +261,11 @@ def _put_text(parent, tag, value):
     node.appendChild(parent.ownerDocument.createTextNode(str(value)))
     return node
 
-
 def _column_number(letter):
     number = 0
     for ch in letter:
         number = number * 26 + ord(ch) - ord("A") + 1
     return number
-
 
 def _get_row(sheet_data, number):
     for row in _children(sheet_data, "row"):
@@ -309,7 +281,6 @@ def _get_row(sheet_data, number):
     new.setAttribute("r", str(number))
     sheet_data.appendChild(new)
     return new
-
 
 def _get_cell(sheet_data, address):
     col, rr = CELL_RE.fullmatch(address).groups()
@@ -328,7 +299,6 @@ def _get_cell(sheet_data, address):
     new.setAttribute("r", address)
     row.appendChild(new)
     return new
-
 
 def _set_cell(sheet_data, address, value, *, formula=False, style=None, array=False):
     cell = _get_cell(sheet_data, address)
@@ -358,14 +328,10 @@ def _set_cell(sheet_data, address, value, *, formula=False, style=None, array=Fa
             t.setAttribute("xml:space", "preserve")
         cell.appendChild(inline)
 
-
 def _formula_e(rr):
-    # The cost sheet's hidden D column is a two-field key. INDEX/MATCH uses
-    # an ordinary cell formula, without Excel dynamic-array cell metadata.
-    return (f'IF(OR(A{rr}="",B{rr}=""),"",IFERROR(INDEX('
-            f"'Cost Sheet'!$C$2:$C$1000,MATCH(A{rr}&CHAR(31)&B{rr},"
-            "'Cost Sheet'!$D$2:$D$1000,0)),\"\"))")
-
+    return (f'IF(OR(A{rr}="",B{rr}=""),"",IFERROR(_xlfn.XLOOKUP(1,'
+            f"('Cost Sheet'!$A$2:$A$1000=A{rr})*('Cost Sheet'!$B$2:$B$1000=B{rr}),"
+            "'Cost Sheet'!$C$2:$C$1000),\"\"))")
 
 def _shift_footer(sheet_data, delta):
     if not delta:
@@ -379,7 +345,6 @@ def _shift_footer(sheet_data, delta):
             old = cell.getAttribute("r")
             col = CELL_RE.fullmatch(old).group(1)
             cell.setAttribute("r", f"{col}{rr + delta}")
-
 
 def _named_ranges(wb_doc, types, events_by_type):
     defined = wb_doc.getElementsByTagName("definedNames")[0]
@@ -402,7 +367,6 @@ def _named_ranges(wb_doc, types, events_by_type):
             return node
     return None
 
-
 def _cost_helpers(cost_doc, costs):
     root = cost_doc.documentElement
     sheet_data = _direct(root, "sheetData")
@@ -413,9 +377,6 @@ def _cost_helpers(cost_doc, costs):
         _set_cell(sheet_data, f"A{rr}", rec["Type"])
         _set_cell(sheet_data, f"B{rr}", rec["Event"])
         _set_cell(sheet_data, f"C{rr}", float(rec["Cost"]) if pd.notna(rec["Cost"]) else None)
-    for rr in range(2, 1001):
-        _set_cell(sheet_data, f"D{rr}",
-                  f'IF(OR(A{rr}="",B{rr}=""),"",A{rr}&CHAR(31)&B{rr})', formula=True)
     types = sorted(costs["Type"].unique(), key=str.casefold)
     events_by_type = []
     _set_cell(sheet_data, "J1", "Type dropdown")
@@ -427,18 +388,6 @@ def _cost_helpers(cost_doc, costs):
         for rr, event in enumerate(events, start=2):
             _set_cell(sheet_data, f"{col}{rr}", event)
     cols = _direct(root, "cols")
-    key_col = cost_doc.createElement("col")
-    key_col.setAttribute("min", "4")
-    key_col.setAttribute("max", "4")
-    key_col.setAttribute("hidden", "1")
-    key_col.setAttribute("width", "8")
-    key_col.setAttribute("customWidth", "1")
-    for existing in _children(cols, "col"):
-        if int(existing.getAttribute("min")) > 4:
-            cols.insertBefore(key_col, existing)
-            break
-    else:
-        cols.appendChild(key_col)
     hidden = cost_doc.createElement("col")
     hidden.setAttribute("min", "10")
     hidden.setAttribute("max", str(10 + len(types)))
@@ -446,9 +395,8 @@ def _cost_helpers(cost_doc, costs):
     hidden.setAttribute("width", "8")
     hidden.setAttribute("customWidth", "1")
     cols.appendChild(hidden)
-    _direct(root, "dimension").setAttribute("ref", f"A1:{get_column_letter(10+len(types))}1000")
+    _direct(root, "dimension").setAttribute("ref", f"A1:{get_column_letter(10+len(types))}{max(102,len(costs)+1)}")
     return types, events_by_type
-
 
 def _data_validations(sheet_doc, last_item):
     root = sheet_doc.documentElement
@@ -482,14 +430,12 @@ def _data_validations(sheet_doc, last_item):
     # OOXML worksheet order places dataValidations before pageMargins.
     root.insertBefore(dvs, _direct(root, "pageMargins"))
 
-
 def _set_notes(notes_doc, first):
     data = _direct(notes_doc.documentElement, "sheetData")
     for addr, field in [("A2", NOTES[0]), ("A3", NOTES[1]),
                         ("B2", first.get("_note_q1", "")), ("B3", first.get("_note_q2", ""))]:
         _set_cell(data, addr, field)
     _direct(notes_doc.documentElement, "dimension").setAttribute("ref", "A1:H3")
-
 
 def populate_template(template_bytes: bytes, rows: pd.DataFrame, costs: pd.DataFrame) -> bytes:
     with zipfile.ZipFile(BytesIO(template_bytes)) as original:
@@ -503,7 +449,6 @@ def populate_template(template_bytes: bytes, rows: pd.DataFrame, costs: pd.DataF
     cost_sheet = minidom.parseString(data["xl/worksheets/sheet4.xml"])
     notes = minidom.parseString(data["xl/worksheets/sheet3.xml"])
     workbook = minidom.parseString(data["xl/workbook.xml"])
-
     n = len(rows)
     last_item = max(44, START_ROW + n + SPARE_ROWS - 1)
     delta = last_item - 44
@@ -528,10 +473,9 @@ def populate_template(template_bytes: bytes, rows: pd.DataFrame, costs: pd.DataF
             ("F", int(item["Qty"]) if item is not None else None),
         ):
             _set_cell(sheet_data, f"{col}{rr}", value, style=6 if rr > 44 else None)
-        # Rewrite every existing formula too. Leaving the template's shared
-        # G16:G43 group and E15:E43 array metadata triggers Excel repair.
-        _set_cell(sheet_data, f"E{rr}", _formula_e(rr), formula=True, style=32)
-        _set_cell(sheet_data, f"G{rr}", f'IF(F{rr}="","",E{rr}*F{rr})', formula=True, style=33)
+        if rr >= 44:
+            _set_cell(sheet_data, f"E{rr}", _formula_e(rr), formula=True, style=32, array=True)
+            _set_cell(sheet_data, f"G{rr}", f'IF(F{rr}="","",E{rr}*F{rr})', formula=True, style=33)
     footer = 45 + delta
     _set_cell(sheet_data, f"H{footer}", f"SUM(G{START_ROW}:G{last_item})", formula=True)
     _set_cell(sheet_data, f"H{footer+4}", f"H{footer}-H{footer+2}", formula=True)
@@ -539,7 +483,6 @@ def populate_template(template_bytes: bytes, rows: pd.DataFrame, costs: pd.DataF
     _set_cell(sheet_data, f"H{footer+8}", f"H{footer+4}+H{footer+6}", formula=True)
     _direct(root, "dimension").setAttribute("ref", f"A1:I{footer+8}")
     _data_validations(sheet, last_item)
-
     types, events = _cost_helpers(cost_sheet, costs)
     area = _named_ranges(workbook, types, events)
     if area is not None:
@@ -576,7 +519,6 @@ def populate_template(template_bytes: bytes, rows: pd.DataFrame, costs: pd.DataF
             z.writestr(info[name], contents)
     return output.getvalue()
 
-
 def result_zip(form: pd.DataFrame, costs: pd.DataFrame, template_bytes: bytes):
     clean = transform_wishlist(form, costs)
     if clean.empty:
@@ -594,7 +536,6 @@ def result_zip(form: pd.DataFrame, costs: pd.DataFrame, template_bytes: bytes):
             filename = f"templates/{submission:03d} - {safe(provider)} - {safe(name)} - WISHLIST.xlsx"
             archive.writestr(filename, populate_template(template_bytes, group, costs))
     return output.getvalue(), clean_export
-
 
 def main():
     import streamlit as st
@@ -628,6 +569,6 @@ def main():
         st.download_button("Download results ZIP", data=data, file_name="MOF26-27-results.zip",
                            mime="application/zip")
 
-
 if __name__ == "__main__":
     main()
+
